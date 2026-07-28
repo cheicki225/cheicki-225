@@ -23,6 +23,7 @@ import opportunity_logger
 import symbol_discovery
 import health_manager
 import paper_trading
+import api_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -868,6 +869,7 @@ async def main():
     tasks.append(asyncio.create_task(nettoyage_periodique()))
     tasks.append(asyncio.create_task(telegram_menu_bot.demarrer_bot_telegram()))
     tasks.append(asyncio.create_task(health_manager.surveiller_sante(prix_live)))
+    tasks.append(asyncio.create_task(api_server.demarrer_serveur_web()))
 
     await asyncio.gather(*tasks)
 
