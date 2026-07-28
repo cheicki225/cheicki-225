@@ -48,15 +48,35 @@ async def paires_binance() -> dict:
     """Retourne {symbole: volume_24h_usdt} pour les paires USDT actives."""
     async with _session_avec_dns_force() as session:
         async with session.get("https://api.binance.com/api/v3/exchangeInfo") as resp:
-            info = await resp.json()
+            texte_brut = await resp.text()
+            try:
+                info = await resp.json(content_type=None)
+            except Exception:
+                log.error(f"Binance exchangeInfo — réponse non-JSON (probable blocage régional) : {texte_brut[:200]}")
+                return {}
         async with session.get("https://api.binance.com/api/v3/ticker/24hr") as resp:
-            tickers = await resp.json()
+            texte_brut = await resp.text()
+            try:
+                tickers = await resp.json(content_type=None)
+            except Exception:
+                log.error(f"Binance ticker24hr — réponse non-JSON (probable blocage régional) : {texte_brut[:200]}")
+                return {}
+
+    if not isinstance(info, dict):
+        log.error(f"Binance exchangeInfo — format inattendu (probable blocage régional) : {str(info)[:200]}")
+        return {}
+    if not isinstance(tickers, list):
+        log.error(f"Binance ticker24hr — format inattendu (probable blocage régional) : {str(tickers)[:200]}")
+        return {}
 
     valides = {
         s["symbol"] for s in info.get("symbols", [])
-        if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+        if isinstance(s, dict) and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
     }
-    volumes = {t["symbol"]: float(t.get("quoteVolume", 0)) for t in tickers if t.get("symbol") in valides}
+    volumes = {
+        t["symbol"]: float(t.get("quoteVolume", 0))
+        for t in tickers if isinstance(t, dict) and t.get("symbol") in valides
+    }
     return volumes
 
 
@@ -65,20 +85,34 @@ async def paires_bybit() -> dict:
         async with session.get(
             "https://api.bybit.com/v5/market/instruments-info", params={"category": "spot"}
         ) as resp:
-            info = await resp.json()
+            texte_brut = await resp.text()
+            try:
+                info = await resp.json(content_type=None)
+            except Exception:
+                log.error(f"Bybit instruments-info — réponse non-JSON (probable blocage/limite régional) : {texte_brut[:200]}")
+                return {}
         async with session.get(
             "https://api.bybit.com/v5/market/tickers", params={"category": "spot"}
         ) as resp:
-            tickers = await resp.json()
+            texte_brut = await resp.text()
+            try:
+                tickers = await resp.json(content_type=None)
+            except Exception:
+                log.error(f"Bybit tickers — réponse non-JSON (probable blocage/limite régional) : {texte_brut[:200]}")
+                return {}
+
+    if not isinstance(info, dict) or not isinstance(tickers, dict):
+        log.error("Bybit — format de réponse inattendu (probable blocage régional)")
+        return {}
 
     valides = {
         s["symbol"] for s in info.get("result", {}).get("list", [])
-        if s.get("quoteCoin") == "USDT" and s.get("status") == "Trading"
+        if isinstance(s, dict) and s.get("quoteCoin") == "USDT" and s.get("status") == "Trading"
     }
     volumes = {
         t["symbol"]: float(t.get("turnover24h", 0))
         for t in tickers.get("result", {}).get("list", [])
-        if t.get("symbol") in valides
+        if isinstance(t, dict) and t.get("symbol") in valides
     }
     return volumes
 
