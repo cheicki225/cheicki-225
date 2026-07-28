@@ -242,10 +242,26 @@ class KuCoinWS(ExchangeWebSocket):
     name = "kucoin"
 
     async def get_token_and_endpoint(self) -> tuple[str, str]:
-        from aiohttp.resolver import AsyncResolver
-        resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
-        connector = aiohttp.TCPConnector(resolver=resolver)
-        async with aiohttp.ClientSession(connector=connector) as session:
+        """
+        Sur Windows, pycares/aiodns échoue parfois à lire la config DNS
+        système, d'où le forçage de Google DNS. Sur Linux (ex: Railway),
+        ce forçage peut lui-même échouer selon la version de pycares —
+        on retombe alors sur le résolveur par défaut.
+        """
+        import platform
+        session = None
+        if platform.system() == "Windows":
+            try:
+                from aiohttp.resolver import AsyncResolver
+                resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
+                connector = aiohttp.TCPConnector(resolver=resolver)
+                session = aiohttp.ClientSession(connector=connector)
+            except Exception:
+                session = None
+        if session is None:
+            session = aiohttp.ClientSession()
+
+        async with session:
             async with session.post("https://api.kucoin.com/api/v1/bullet-public") as resp:
                 data = await resp.json()
                 token = data["data"]["token"]

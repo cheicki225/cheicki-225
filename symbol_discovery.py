@@ -24,10 +24,24 @@ log = logging.getLogger("symbol_discovery")
 
 
 def _session_avec_dns_force() -> aiohttp.ClientSession:
-    from aiohttp.resolver import AsyncResolver
-    resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
-    connector = aiohttp.TCPConnector(resolver=resolver)
-    return aiohttp.ClientSession(connector=connector)
+    """
+    Sur Windows, pycares/aiodns échoue parfois à lire la config DNS système
+    (bug connu), d'où le forçage explicite de Google DNS. Sur Linux/Mac
+    (ex: déploiement Railway), ce forçage peut lui-même échouer selon la
+    version de pycares installée ('Channel' object has no attribute
+    'gethostbyname') — on retombe alors sur le résolveur par défaut, qui
+    fonctionne normalement très bien sur ces systèmes.
+    """
+    import platform
+    if platform.system() == "Windows":
+        try:
+            from aiohttp.resolver import AsyncResolver
+            resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
+            connector = aiohttp.TCPConnector(resolver=resolver)
+            return aiohttp.ClientSession(connector=connector)
+        except Exception:
+            pass
+    return aiohttp.ClientSession()
 
 
 async def paires_binance() -> dict:

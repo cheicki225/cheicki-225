@@ -31,15 +31,23 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessag
 
 def _session_avec_dns_force() -> aiohttp.ClientSession:
     """
-    Force explicitement Google DNS (8.8.8.8/8.8.4.4) — pycares/aiodns échoue
-    parfois à lire la config DNS depuis le registre Windows, ce qui cause
-    l'erreur "Could not contact DNS servers" même quand le PC résout bien
-    l'adresse ailleurs (nslookup, navigateur, etc.)
+    Sur Windows, pycares/aiodns échoue parfois à lire la config DNS système
+    (bug connu), d'où le forçage explicite de Google DNS. Sur Linux/Mac
+    (ex: déploiement Railway), ce forçage peut lui-même échouer selon la
+    version de pycares installée ('Channel' object has no attribute
+    'gethostbyname') — on retombe alors sur le résolveur par défaut, qui
+    fonctionne normalement très bien sur ces systèmes.
     """
-    from aiohttp.resolver import AsyncResolver
-    resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
-    connector = aiohttp.TCPConnector(resolver=resolver)
-    return aiohttp.ClientSession(connector=connector)
+    import platform
+    if platform.system() == "Windows":
+        try:
+            from aiohttp.resolver import AsyncResolver
+            resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
+            connector = aiohttp.TCPConnector(resolver=resolver)
+            return aiohttp.ClientSession(connector=connector)
+        except Exception:
+            pass
+    return aiohttp.ClientSession()
 
 # Anti-spam : ne renvoie pas la même opportunité avant ce délai (secondes)
 COOLDOWN_PAR_OPPORTUNITE_SEC = 60
