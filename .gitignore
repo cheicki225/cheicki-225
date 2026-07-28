@@ -1,0 +1,31 @@
+# Environnement / secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs & données locales
+*.log
+*.db
+*.sqlite
+logs/
+
+# Données générées par le bot (régénérées à chaque démarrage/session,
+# pas besoin de les versionner)
+*.csv
+paires_blacklist.json
+
+# Modèles ML entraînés localement (à gérer séparément si volumineux)
+*.pkl
+*.json.bak
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

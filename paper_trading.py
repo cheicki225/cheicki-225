@@ -1,0 +1,504 @@
+"""
+Mode papier (trading simulé) avec gestion du risque
+========================================================
+Simule l'exécution des opportunités détectées, SANS aucun argent réel ni
+appel API authentifié — pour savoir objectivement combien le bot aurait
+vraiment gagné/perdu, ET pour tester des règles de gestion du risque
+avant de les appliquer un jour à de l'argent réel.
+
+Fonctionnalités de gestion du risque :
+1. Élimination d'une crypto après 5 échecs consécutifs (déjà existant)
+2. Circuit breaker global : pause du bot après trop de pertes consécutives
+   toutes cryptos confondues (signal d'un problème plus large)
+3. Stop-loss journalier : coupe les trades papier si le profit du jour
+   devient trop négatif, reset automatique le lendemain
+4. Double vérification : un trade n'est compté "réussi" que si 2 contrôles
+   de profondeur rapprochés confirment TOUS LES DEUX la rentabilité
+5. Score de confiance par crypto : classement du taux de réussite réel
+
+⚠️ Aucune clé API n'est utilisée ici — carnets d'ordres publics uniquement.
+"""
+
+import asyncio
+import csv
+import logging
+import os
+import time
+from datetime import date
+
+import orderbook_depth
+import health_manager
+from config import (
+    CIRCUIT_BREAKER_PERTES_CONSECUTIVES, STOP_LOSS_JOURNALIER_USDT,
+    DOUBLE_VERIFICATION_DELAI_SEC, CAPITAL_PAR_EXCHANGE_PAPIER,
+    SEUIL_REEQUILIBRAGE_PCT, FRAIS_TRANSFERT_SIMULE_USDT, RESEAU_PREFERE, RESEAU_FALLBACK,
+)
+
+log = logging.getLogger("paper_trading")
+
+CSV_PATH = "trades_papier.csv"
+COLONNES = [
+    "timestamp", "symbole", "exchange_achat", "exchange_vente",
+    "montant_usdt", "spread_affiche_pct",
+    "prix_achat_reel", "prix_vente_reel", "spread_reel_pct",
+    "liquidite_suffisante", "double_verification_ok", "profit_usdt", "frais_usdt",
+]
+
+MONTANT_PAR_TRADE_USDT = 50.0
+
+# --- 1. Élimination par crypto après échecs consécutifs (déjà existant) ---
+MAX_ECHECS_CONSECUTIFS = 5
+_echecs_consecutifs = {}
+
+# --- 2. Circuit breaker global (toutes cryptos confondues) ---
+_pertes_consecutives_globales = 0
+_circuit_breaker_actif = False
+
+# --- 3. Stop-loss journalier ---
+_jour_actuel = {"date": None, "profit_du_jour": 0.0, "stop_loss_declenche": False}
+
+_etat_papier = {
+    "capital_initial": 1000.0,
+    "profit_cumule_usdt": 0.0,
+    "nb_trades_reussis": 0,
+    "nb_trades_rejetes_liquidite": 0,
+    "nb_trades_rejetes_double_verif": 0,
+    "nb_trades_total": 0,
+    "nb_cryptos_eliminees": 0,
+}
+
+# --- 5. Score de confiance par crypto ---
+_stats_par_crypto = {}  # symbole -> {"reussis": N, "total": N}
+
+# --- Soldes fictifs par exchange (pour le rééquilibrage simulé) ---
+_soldes_virtuels = {}  # exchange -> solde USDT fictif
+TRANSFERTS_CSV_PATH = "transferts_papier.csv"
+TRANSFERTS_COLONNES = [
+    "timestamp", "exchange_source", "exchange_destination",
+    "montant_usdt", "frais_usdt", "reseau", "raison",
+]
+
+
+def _init_csv():
+    if not os.path.exists(CSV_PATH):
+        with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(COLONNES)
+
+
+def _ecrire_ligne(ligne):
+    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=COLONNES).writerow(ligne)
+
+
+def _reset_jour_si_necessaire():
+    """Remet à zéro le compteur de profit journalier si on a changé de jour."""
+    aujourdhui = str(date.today())
+    if _jour_actuel["date"] != aujourdhui:
+        if _jour_actuel["date"] is not None:
+            log.info(
+                f"📅 Nouveau jour — reset stop-loss journalier "
+                f"(hier : {_jour_actuel['profit_du_jour']:+.3f}$)"
+            )
+        _jour_actuel["date"] = aujourdhui
+        _jour_actuel["profit_du_jour"] = 0.0
+        _jour_actuel["stop_loss_declenche"] = False
+
+
+def stop_loss_journalier_actif():
+    """True si le stop-loss du jour est déclenché — les trades papier doivent être suspendus."""
+    _reset_jour_si_necessaire()
+    return _jour_actuel["stop_loss_declenche"]
+
+
+def circuit_breaker_actif():
+    """True si le circuit breaker global est déclenché."""
+    return _circuit_breaker_actif
+
+
+def reinitialiser_circuit_breaker():
+    """Permet de relancer manuellement après une pause circuit breaker (ex: via Telegram)."""
+    global _pertes_consecutives_globales, _circuit_breaker_actif
+    _pertes_consecutives_globales = 0
+    _circuit_breaker_actif = False
+    log.info("♻️ Circuit breaker réinitialisé manuellement")
+
+
+def _enregistrer_resultat_et_verifier_elimination(symbol, succes):
+    """Élimination par crypto après MAX_ECHECS_CONSECUTIFS échecs d'affilée (inchangé)."""
+    if succes:
+        _echecs_consecutifs[symbol] = 0
+        return
+
+    _echecs_consecutifs[symbol] = _echecs_consecutifs.get(symbol, 0) + 1
+    nb = _echecs_consecutifs[symbol]
+
+    if nb >= MAX_ECHECS_CONSECUTIFS:
+        if symbol not in health_manager.symboles_blacklistes():
+            health_manager.blacklister_manuellement(
+                symbol,
+                f"Échec du mode papier {nb} fois d'affilée (spread réel insuffisant "
+                f"ou liquidité trop faible après vérification de profondeur)"
+            )
+            _etat_papier["nb_cryptos_eliminees"] += 1
+            log.warning(f"🗑️ {symbol} ÉLIMINÉE après {nb} échecs papier consécutifs")
+        _echecs_consecutifs[symbol] = 0
+
+
+def _verifier_circuit_breaker_global(succes):
+    """Incrémente/réinitialise le compteur global de pertes. Déclenche la pause si seuil atteint."""
+    global _pertes_consecutives_globales, _circuit_breaker_actif
+
+    if succes:
+        _pertes_consecutives_globales = 0
+        return
+
+    _pertes_consecutives_globales += 1
+
+    if _pertes_consecutives_globales >= CIRCUIT_BREAKER_PERTES_CONSECUTIVES and not _circuit_breaker_actif:
+        _circuit_breaker_actif = True
+        log.warning(
+            f"🚨 CIRCUIT BREAKER DÉCLENCHÉ : {_pertes_consecutives_globales} pertes "
+            f"consécutives (mode papier) — trades papier suspendus (détection et "
+            f"alertes réelles continuent normalement)"
+        )
+        try:
+            asyncio.create_task(_envoyer_alerte_circuit_breaker())
+        except Exception as e:
+            log.error(f"Impossible d'envoyer l'alerte circuit breaker : {e}")
+
+
+async def _envoyer_alerte_circuit_breaker():
+    try:
+        import telegram_notifier
+        await telegram_notifier.envoyer_message_simple(
+            f"🚨 <b>CIRCUIT BREAKER DÉCLENCHÉ</b>\n\n"
+            f"{CIRCUIT_BREAKER_PERTES_CONSECUTIVES} pertes consécutives détectées en mode papier.\n\n"
+            f"⚠️ Seul le <b>mode papier</b> est suspendu — la détection et les "
+            f"alertes réelles continuent normalement.\n\n"
+            f"Utilise \"♻️ Réinitialiser\" dans le menu pour reprendre le mode papier."
+        )
+    except Exception as e:
+        log.error(f"Échec envoi alerte circuit breaker : {e}")
+
+
+def _verifier_stop_loss_journalier(profit_usdt):
+    """Met à jour le profit du jour et déclenche le stop-loss si le seuil est franchi."""
+    _reset_jour_si_necessaire()
+    _jour_actuel["profit_du_jour"] += profit_usdt
+
+    if _jour_actuel["profit_du_jour"] <= STOP_LOSS_JOURNALIER_USDT and not _jour_actuel["stop_loss_declenche"]:
+        _jour_actuel["stop_loss_declenche"] = True
+        log.warning(
+            f"🛑 STOP-LOSS JOURNALIER DÉCLENCHÉ : {_jour_actuel['profit_du_jour']:+.3f}$ "
+            f"aujourd'hui (seuil : {STOP_LOSS_JOURNALIER_USDT}$) — trades papier suspendus jusqu'à demain"
+        )
+        try:
+            asyncio.create_task(_envoyer_alerte_stop_loss())
+        except Exception:
+            pass
+
+
+async def _envoyer_alerte_stop_loss():
+    try:
+        import telegram_notifier
+        await telegram_notifier.envoyer_message_simple(
+            f"🛑 <b>STOP-LOSS JOURNALIER DÉCLENCHÉ</b>\n\n"
+            f"Perte du jour : {_jour_actuel['profit_du_jour']:+.3f}$\n"
+            f"Seuil configuré : {STOP_LOSS_JOURNALIER_USDT}$\n\n"
+            f"Trades papier suspendus jusqu'à demain (reset automatique à minuit)."
+        )
+    except Exception as e:
+        log.error(f"Échec envoi alerte stop-loss : {e}")
+
+
+def _enregistrer_score_crypto(symbol, succes):
+    """Alimente le classement de confiance par crypto (bouton Top performers)."""
+    stats = _stats_par_crypto.setdefault(symbol, {"reussis": 0, "total": 0})
+    stats["total"] += 1
+    if succes:
+        stats["reussis"] += 1
+
+
+def _init_transferts_csv():
+    if not os.path.exists(TRANSFERTS_CSV_PATH):
+        with open(TRANSFERTS_CSV_PATH, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(TRANSFERTS_COLONNES)
+
+
+def _obtenir_solde(exchange):
+    """Initialise le solde fictif d'un exchange à sa première utilisation."""
+    if exchange not in _soldes_virtuels:
+        _soldes_virtuels[exchange] = CAPITAL_PAR_EXCHANGE_PAPIER
+    return _soldes_virtuels[exchange]
+
+
+def _appliquer_mouvement_trade(ex_achat, ex_vente, montant_usdt, profit_net_usdt):
+    """
+    Simule le mouvement de capital d'un trade réussi : on suppose un
+    aller-retour complet sur l'exchange d'achat (stratégie "fonds
+    pré-répartis" choisie plus tôt — pas de transfert physique à chaque
+    trade), et le profit net est crédité sur l'exchange de vente.
+    """
+    _obtenir_solde(ex_achat)
+    _obtenir_solde(ex_vente)
+    _soldes_virtuels[ex_vente] += profit_net_usdt
+
+
+def obtenir_soldes():
+    """Retourne une copie des soldes fictifs actuels par exchange."""
+    return dict(_soldes_virtuels)
+
+
+def _verifier_besoin_reequilibrage():
+    """
+    Si un exchange a un solde significativement plus bas que la moyenne des
+    autres, simule un transfert automatique depuis l'exchange le plus riche
+    — TOUJOURS en simulation, aucune clé API réelle n'est utilisée ici.
+    """
+    if len(_soldes_virtuels) < 2:
+        return
+
+    moyenne = sum(_soldes_virtuels.values()) / len(_soldes_virtuels)
+    if moyenne <= 0:
+        return
+
+    exchange_pauvre = min(_soldes_virtuels, key=_soldes_virtuels.get)
+    solde_pauvre = _soldes_virtuels[exchange_pauvre]
+
+    if solde_pauvre < moyenne * (SEUIL_REEQUILIBRAGE_PCT / 100):
+        exchange_riche = max(_soldes_virtuels, key=_soldes_virtuels.get)
+        if exchange_riche == exchange_pauvre:
+            return
+
+        solde_riche = _soldes_virtuels[exchange_riche]
+        montant_transfert = round((solde_riche - moyenne) / 2, 2)
+        if montant_transfert > FRAIS_TRANSFERT_SIMULE_USDT:
+            simuler_transfert(
+                exchange_riche, exchange_pauvre, montant_transfert,
+                raison=f"Rééquilibrage auto ({exchange_pauvre} à {solde_pauvre:.2f}$, "
+                       f"sous {SEUIL_REEQUILIBRAGE_PCT}% de la moyenne {moyenne:.2f}$)"
+            )
+
+
+def simuler_transfert(exchange_source, exchange_dest, montant_usdt, raison="Manuel"):
+    """
+    Simule un transfert entre 2 exchanges (réseau SOL prioritaire) — déduit
+    les frais simulés, mais NE FAIT AUCUN appel API réel.
+    """
+    _init_transferts_csv()
+    _obtenir_solde(exchange_source)
+    _obtenir_solde(exchange_dest)
+
+    if _soldes_virtuels[exchange_source] < montant_usdt + FRAIS_TRANSFERT_SIMULE_USDT:
+        log.warning(f"🚫 Transfert simulé impossible : solde insuffisant sur {exchange_source}")
+        return {"execute": False, "raison": "solde insuffisant"}
+
+    _soldes_virtuels[exchange_source] -= (montant_usdt + FRAIS_TRANSFERT_SIMULE_USDT)
+    _soldes_virtuels[exchange_dest] += montant_usdt
+
+    with open(TRANSFERTS_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=TRANSFERTS_COLONNES).writerow({
+            "timestamp": time.time(),
+            "exchange_source": exchange_source, "exchange_destination": exchange_dest,
+            "montant_usdt": montant_usdt, "frais_usdt": FRAIS_TRANSFERT_SIMULE_USDT,
+            "reseau": RESEAU_PREFERE, "raison": raison,
+        })
+
+    log.info(
+        f"💸 Transfert SIMULÉ : {montant_usdt:.2f}$ {exchange_source} → {exchange_dest} "
+        f"(frais simulés {FRAIS_TRANSFERT_SIMULE_USDT}$, réseau {RESEAU_PREFERE}) — {raison}"
+    )
+    return {"execute": True, "montant": montant_usdt, "frais": FRAIS_TRANSFERT_SIMULE_USDT}
+
+
+def stats_soldes():
+    """Résumé des soldes fictifs par exchange, pour le menu Telegram."""
+    if not _soldes_virtuels:
+        return "💼 Aucun solde fictif enregistré pour l'instant (attends le premier trade papier)."
+
+    total = sum(_soldes_virtuels.values())
+    lignes = ["💼 <b>SOLDES FICTIFS PAR EXCHANGE</b> (mode papier)\n"]
+    for exchange, solde in sorted(_soldes_virtuels.items(), key=lambda x: -x[1]):
+        lignes.append(f"• {exchange} : {solde:.2f}$")
+    lignes.append(f"\nTotal : {total:.2f}$")
+    lignes.append("\n⚠️ Simulation uniquement — aucun vrai transfert n'est exécuté.")
+    return "\n".join(lignes)
+
+
+def historique_transferts(limite=10):
+    """Derniers transferts simulés — pour le menu Telegram."""
+    if not os.path.exists(TRANSFERTS_CSV_PATH):
+        return "💸 Aucun transfert simulé pour l'instant."
+    with open(TRANSFERTS_CSV_PATH, newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+    if not lignes:
+        return "💸 Aucun transfert simulé pour l'instant."
+
+    dernieres = lignes[-limite:]
+    texte = ["💸 <b>DERNIERS TRANSFERTS SIMULÉS</b>\n"]
+    for l in reversed(dernieres):
+        texte.append(
+            f"• {l['montant_usdt']}$ : {l['exchange_source']} → {l['exchange_destination']} "
+            f"(frais {l['frais_usdt']}$)"
+        )
+    return "\n".join(texte)
+
+
+async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USDT):
+    """
+    Simule l'exécution d'une opportunité d'arbitrage inter-exchange, avec
+    gestion complète du risque :
+    1. Bloque si le circuit breaker global ou le stop-loss journalier est actif
+    2. Double vérification de profondeur (2 contrôles rapprochés)
+    3. Calcule le profit réaliste après slippage ET frais
+    4. Met à jour circuit breaker, stop-loss et score de confiance
+    5. Élimine la crypto après 5 échecs consécutifs
+    """
+    _init_csv()
+
+    if circuit_breaker_actif():
+        return {"execute": False, "raison": "circuit breaker actif"}
+    if stop_loss_journalier_actif():
+        return {"execute": False, "raison": "stop-loss journalier actif"}
+
+    ex_achat, ex_vente = opp.exchanges
+    symbol = opp.symboles[0]
+
+    # Re-vérifie la blacklist ICI, pas juste au moment de la détection —
+    # avec un token très volatil, des dizaines de tâches peuvent déjà être
+    # en file d'attente au moment où la crypto se fait blacklister ; sans
+    # ce deuxième contrôle, elles s'exécutent quand même jusqu'au bout
+    if symbol in health_manager.symboles_blacklistes():
+        return {"execute": False, "raison": "blacklistée entre-temps"}
+
+    _etat_papier["nb_trades_total"] += 1
+
+    # --- Contrôle instantané unique (pas de délai d'attente) ---
+    resultat = await orderbook_depth.estimer_execution_reelle(ex_achat, ex_vente, symbol, montant_usdt)
+
+    ligne = {
+        "timestamp": time.time(), "symbole": symbol,
+        "exchange_achat": ex_achat, "exchange_vente": ex_vente,
+        "montant_usdt": montant_usdt, "spread_affiche_pct": opp.spread_net_pct,
+        "prix_achat_reel": "", "prix_vente_reel": "", "spread_reel_pct": "",
+        "liquidite_suffisante": False, "double_verification_ok": False,
+        "profit_usdt": "", "frais_usdt": "",
+    }
+
+    liquide = bool(resultat and resultat.get("liquidite_suffisante"))
+
+    if not liquide:
+        _etat_papier["nb_trades_rejetes_liquidite"] += 1
+        _ecrire_ligne(ligne)
+        log.info(f"🚫 Trade papier REJETÉ (liquidité insuffisante) : {symbol} {ex_achat}->{ex_vente}")
+        _enregistrer_resultat_et_verifier_elimination(symbol, succes=False)
+        _verifier_circuit_breaker_global(succes=False)
+        _enregistrer_score_crypto(symbol, succes=False)
+        return {"execute": False, "raison": "liquidité insuffisante"}
+
+    spread_reel_pct = resultat["spread_reel_pct"]
+    frais_usdt = montant_usdt * (frais_pct_total / 100)
+    profit_net_usdt = montant_usdt * (spread_reel_pct / 100) - frais_usdt
+
+    # Sans double vérification, "OK" = juste le fait que ce soit rentable après frais
+    double_verif_ok = spread_reel_pct > frais_pct_total
+
+    ligne.update({
+        "prix_achat_reel": resultat["prix_achat_reel"],
+        "prix_vente_reel": resultat["prix_vente_reel"],
+        "spread_reel_pct": spread_reel_pct,
+        "liquidite_suffisante": True,
+        "double_verification_ok": double_verif_ok,
+        "profit_usdt": round(profit_net_usdt, 4),
+        "frais_usdt": round(frais_usdt, 4),
+    })
+    _ecrire_ligne(ligne)
+
+    # Un trade n'est compté "réussi" que si la double vérif ET le profit sont positifs
+    succes = double_verif_ok and profit_net_usdt > 0
+    if not double_verif_ok:
+        _etat_papier["nb_trades_rejetes_double_verif"] += 1
+
+    _etat_papier["profit_cumule_usdt"] += profit_net_usdt
+    if succes:
+        _etat_papier["nb_trades_reussis"] += 1
+
+    _enregistrer_resultat_et_verifier_elimination(symbol, succes=succes)
+    _verifier_circuit_breaker_global(succes=succes)
+    _verifier_stop_loss_journalier(profit_net_usdt)
+    _enregistrer_score_crypto(symbol, succes=succes)
+
+    # Met à jour les soldes fictifs par exchange et vérifie si un
+    # rééquilibrage simulé est nécessaire (toujours en simulation)
+    _appliquer_mouvement_trade(ex_achat, ex_vente, montant_usdt, profit_net_usdt)
+    _verifier_besoin_reequilibrage()
+
+    log.info(
+        f"🧪 Trade papier {'✅' if succes else '❌'} : {symbol} "
+        f"{ex_achat}->{ex_vente} | spread réel={spread_reel_pct:.3f}% "
+        f"(affiché={opp.spread_net_pct:.3f}%, double vérif={'OK' if double_verif_ok else 'ÉCHEC'}) "
+        f"| profit net={profit_net_usdt:+.3f}$"
+    )
+
+    return {"execute": True, "profit_usdt": profit_net_usdt, "spread_reel_pct": spread_reel_pct, "succes": succes}
+
+
+def stats_papier():
+    """Résumé complet du mode papier — profit, taux de réussite, circuit breaker, stop-loss."""
+    _reset_jour_si_necessaire()
+    e = _etat_papier
+    capital_actuel = e["capital_initial"] + e["profit_cumule_usdt"]
+    nb_executes = e["nb_trades_total"] - e["nb_trades_rejetes_liquidite"]
+    taux_reussite = (e["nb_trades_reussis"] / nb_executes * 100) if nb_executes > 0 else 0
+
+    statut_cb = "🚨 ACTIF (trades papier suspendus)" if _circuit_breaker_actif else "🟢 OK"
+    statut_sl = "🛑 ACTIF (trades suspendus)" if _jour_actuel["stop_loss_declenche"] else "🟢 OK"
+
+    return (
+        f"🧪 <b>MODE PAPIER (simulation)</b>\n\n"
+        f"Capital fictif initial : {e['capital_initial']:.2f}$\n"
+        f"Profit/perte cumulé : {e['profit_cumule_usdt']:+.3f}$\n"
+        f"Capital fictif actuel : {capital_actuel:.2f}$\n\n"
+        f"Trades tentés : {e['nb_trades_total']}\n"
+        f"Rejetés (liquidité) : {e['nb_trades_rejetes_liquidite']}\n"
+        f"Rejetés (double vérif) : {e['nb_trades_rejetes_double_verif']}\n"
+        f"Trades exécutés : {nb_executes}\n"
+        f"Taux de réussite : {taux_reussite:.1f}%\n"
+        f"🗑️ Cryptos éliminées : {e['nb_cryptos_eliminees']}\n\n"
+        f"⚙️ <b>Gestion du risque</b>\n"
+        f"Circuit breaker : {statut_cb} ({_pertes_consecutives_globales}/{CIRCUIT_BREAKER_PERTES_CONSECUTIVES} pertes)\n"
+        f"Stop-loss journalier : {statut_sl}\n"
+        f"Profit du jour : {_jour_actuel['profit_du_jour']:+.3f}$ (seuil : {STOP_LOSS_JOURNALIER_USDT}$)\n\n"
+        f"⚠️ Simulation uniquement — aucun argent réel engagé."
+    )
+
+
+def top_performers(limite=10):
+    """Classement des cryptos par taux de réussite réel en mode papier."""
+    if not _stats_par_crypto:
+        return "🏆 Aucune donnée pour l'instant — laisse le bot tourner un peu."
+
+    classement = []
+    for symbole, stats in _stats_par_crypto.items():
+        if stats["total"] < 2:  # ignore les cryptos avec trop peu de données
+            continue
+        taux = stats["reussis"] / stats["total"] * 100
+        classement.append((symbole, taux, stats["reussis"], stats["total"]))
+
+    if not classement:
+        return "🏆 Pas assez de données par crypto pour l'instant (minimum 2 trades chacune)."
+
+    classement.sort(key=lambda x: x[1], reverse=True)
+
+    lignes = ["🏆 <b>TOP PERFORMERS</b> (taux de réussite mode papier)\n"]
+    for symbole, taux, reussis, total in classement[:limite]:
+        emoji = "✅" if taux >= 50 else "⚠️" if taux >= 20 else "❌"
+        lignes.append(f"{emoji} {symbole} : {taux:.0f}% ({reussis}/{total})")
+
+    return "\n".join(lignes)
+
+
+if __name__ == "__main__":
+    print(stats_papier())
+    print()
+    print(top_performers())

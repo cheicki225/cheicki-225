@@ -1,0 +1,138 @@
+"""
+Configuration centralisée du bot d'arbitrage
+=================================================
+Tous les seuils critiques ici, en un seul endroit — plus besoin de chercher
+dans 5 fichiers différents pour ajuster le comportement du bot.
+
+⚠️ Si tu modifies un seuil ici, redémarre le bot pour que ça prenne effet
+(certains sont lus une seule fois au démarrage).
+"""
+
+# ============================================================
+# SEUILS D'ARBITRAGE (spread net, après frais)
+# ============================================================
+SEUIL_MIN_INTER_EXCHANGE_PCT = 0.5   # % net minimum pour déclencher une alerte Telegram
+SEUIL_MIN_TRIANGULAIRE_PCT = 0.4     # idem pour le triangulaire
+
+# Seuil bas séparé pour la COLLECTE DE DONNÉES ML (pas d'alerte, juste logging)
+SEUIL_MIN_COLLECTE_ML_PCT = 0.05
+
+
+# ============================================================
+# DÉTECTION DES FAUX POSITIFS / DONNÉES SUSPECTES
+# ============================================================
+# Écart brut au-delà duquel c'est presque toujours une collision de ticker
+# ou un bug, jamais un vrai écart d'arbitrage — blacklisté immédiatement
+SEUIL_ECART_ABSURDE_PCT = 20.0
+
+# Combien de temps un même écart doit persister SANS jamais se refermer
+# avant d'être considéré suspect (un vrai écart se referme en quelques secondes)
+SEUIL_PERSISTANCE_SUSPECTE_SEC = 20
+
+# Tolérance de courte absence avant de considérer qu'une opportunité s'est
+# VRAIMENT refermée (évite qu'un prix pas encore rafraîchi ne réinitialise
+# le compteur de persistance à tort)
+GRACE_PERIODE_SEC = 5
+
+# Pas de prix reçu depuis ce délai -> paire considérée en panne
+# 60s était trop strict avec 300+ paires : certains altcoins peu actifs
+# ne reçoivent naturellement aucune mise à jour pendant 1-2 minutes, sans
+# que ce soit une vraie panne de connexion. 150s laisse plus de marge.
+SEUIL_PANNE_SEC = 150
+
+# Une paire blacklistée est réexaminée après ce délai — évite qu'un faux
+# positif n'exclue une paire définitivement (et de toute façon, la
+# blacklist entière repart à zéro à chaque redémarrage du bot)
+TTL_BLACKLIST_SEC = 1 * 3600  # 1 heure
+
+# Tickers courts/génériques à très haut risque de désigner une crypto
+# DIFFÉRENTE selon l'exchange — exclus par précaution dès la découverte
+TICKERS_A_RISQUE = {
+    "U", "A", "S", "T", "C", "H", "G", "W", "F",
+    "AI", "ONE", "IO", "OG", "ID",
+}
+
+
+# ============================================================
+# ALERTE DE SANTÉ GLOBALE
+# ============================================================
+# Si le nombre total de paires actives chute de plus de ce pourcentage par
+# rapport au maximum observé dans la session, alerte Telegram immédiate —
+# signe probable d'un bug (ex: blacklist qui explose, exchange down, etc.)
+SEUIL_CHUTE_PAIRES_ALERTE_PCT = 40  # ex: 40 = alerte si on perd 40%+ des paires
+COOLDOWN_ALERTE_CHUTE_SEC = 600     # ne renvoie pas l'alerte plus d'1x/10min
+
+
+# ============================================================
+# INFRASTRUCTURE / CONNEXIONS
+# ============================================================
+NB_CONNEXIONS_PAR_EXCHANGE = 4   # découpage des paires en plusieurs connexions WS
+MIN_EXCHANGES = 3                # une paire doit exister sur au moins N exchanges pour être utilisée
+
+# Volume minimum (24h, en $) sur un exchange pour qu'une paire y soit
+# considérée comme "liquide" — élimine à la source les tokens listés
+# partout mais tradés nulle part (carnet trop fin, faux signaux garantis)
+VOLUME_MIN_USDT = 350_000
+
+FRAIS_TRADING_PCT = {
+    "binance": 0.10, "bybit": 0.10, "okx": 0.10, "kucoin": 0.10, "bitget": 0.10,
+    "gateio": 0.20,  # confirmé : 2x plus cher que les autres au tarif de base (sans token GT/VIP)
+}
+
+
+# ============================================================
+# RÉSEAUX POUR REEQUILIBRAGE (transferts entre exchanges)
+# ============================================================
+RESEAU_PREFERE = "SOL"
+RESEAU_FALLBACK = "TRC20"
+
+
+# ============================================================
+# LIMITE GLOBALE D'ALERTES
+# ============================================================
+# Maximum de cryptos DIFFÉRENTES alertées par minute glissante — évite
+# qu'une seule paire instable (ex: un altcoin peu liquide qui oscille)
+# ne monopolise le flux d'alertes Telegram
+MAX_ALERTES_PAR_MINUTE = 30
+
+# Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
+# la combinaison d'exchanges — évite qu'une crypto volatile ne déclenche
+# des dizaines d'alertes/trades papier en quelques secondes
+COOLDOWN_PAR_CRYPTO_SEC = 15
+
+# Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
+# la combinaison d'exchanges — évite qu'une crypto volatile ne re-déclenche
+# en boucle à chaque petit mouvement de prix
+COOLDOWN_PAR_CRYPTO_SEC = 15
+
+
+# ============================================================
+# GESTION DU RISQUE (mode papier)
+# ============================================================
+# Circuit breaker global : pause automatique du bot si trop de pertes
+# consécutives sur TOUTES les cryptos confondues (signal qu'un problème
+# plus large existe — bug, marché anormal — pas juste une crypto isolée)
+CIRCUIT_BREAKER_PERTES_CONSECUTIVES = 10
+
+# Stop-loss journalier : si le profit papier cumulé de la journée descend
+# sous ce seuil (négatif), les alertes/trades papier sont coupés jusqu'au
+# lendemain (reset automatique à minuit)
+STOP_LOSS_JOURNALIER_USDT = -20.0
+
+# Double vérification : délai entre les 2 contrôles de profondeur avant de
+# valider un trade papier comme "réussi" — les deux doivent être rentables
+DOUBLE_VERIFICATION_DELAI_SEC = 0.5
+
+# ============================================================
+# TRANSFERT DE FONDS ENTRE EXCHANGES (mode papier uniquement pour l'instant)
+# ============================================================
+# Capital fictif de départ par exchange (mode papier)
+CAPITAL_PAR_EXCHANGE_PAPIER = 200.0
+
+# Si le solde d'un exchange descend sous ce % du solde moyen des autres,
+# un rééquilibrage simulé se déclenche automatiquement
+SEUIL_REEQUILIBRAGE_PCT = 50.0
+
+# Frais de transfert simulé (réseau SOL ~0.01$, TRC20 ~1$ — on prend une
+# estimation prudente pour ne pas sous-estimer le coût réel)
+FRAIS_TRANSFERT_SIMULE_USDT = 0.5
