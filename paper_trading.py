@@ -29,7 +29,7 @@ from datetime import date
 import orderbook_depth
 import health_manager
 from config import (
-    CIRCUIT_BREAKER_PERTES_CONSECUTIVES, STOP_LOSS_JOURNALIER_USDT,
+    CIRCUIT_BREAKER_PERTES_CONSECUTIVES, CIRCUIT_BREAKER_ACTIVE, STOP_LOSS_JOURNALIER_USDT,
     DOUBLE_VERIFICATION_DELAI_SEC, CAPITAL_PAR_EXCHANGE_PAPIER,
     SEUIL_REEQUILIBRAGE_PCT, FRAIS_TRANSFERT_SIMULE_USDT, RESEAU_PREFERE, RESEAU_FALLBACK,
 )
@@ -111,7 +111,9 @@ def stop_loss_journalier_actif():
 
 
 def circuit_breaker_actif():
-    """True si le circuit breaker global est déclenché."""
+    """True si le circuit breaker global est déclenché (toujours False si désactivé via config.py)."""
+    if not CIRCUIT_BREAKER_ACTIVE:
+        return False
     return _circuit_breaker_actif
 
 
@@ -147,6 +149,9 @@ def _enregistrer_resultat_et_verifier_elimination(symbol, succes):
 def _verifier_circuit_breaker_global(succes):
     """Incrémente/réinitialise le compteur global de pertes. Déclenche la pause si seuil atteint."""
     global _pertes_consecutives_globales, _circuit_breaker_actif
+
+    if not CIRCUIT_BREAKER_ACTIVE:
+        return  # désactivé via config.py — aucun suivi, aucune pause automatique
 
     if succes:
         _pertes_consecutives_globales = 0
@@ -439,6 +444,19 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         f"(affiché={opp.spread_net_pct:.3f}%, double vérif={'OK' if double_verif_ok else 'ÉCHEC'}) "
         f"| profit net={profit_net_usdt:+.3f}$"
     )
+
+    try:
+        import telegram_notifier
+        emoji = "✅" if succes else "❌"
+        asyncio.create_task(telegram_notifier.envoyer_message_simple(
+            f"🧪 <b>Trade papier {emoji}</b>\n\n"
+            f"{symbol} : {ex_achat} → {ex_vente}\n"
+            f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
+            f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
+            f"Profit net : {profit_net_usdt:+.3f}$"
+        ))
+    except Exception as e:
+        log.error(f"Échec notification trade papier : {e}")
 
     return {"execute": True, "profit_usdt": profit_net_usdt, "spread_reel_pct": spread_reel_pct, "succes": succes}
 

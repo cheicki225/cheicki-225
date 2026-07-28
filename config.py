@@ -112,6 +112,11 @@ COOLDOWN_PAR_CRYPTO_SEC = 15
 # Circuit breaker global : pause automatique du bot si trop de pertes
 # consécutives sur TOUTES les cryptos confondues (signal qu'un problème
 # plus large existe — bug, marché anormal — pas juste une crypto isolée)
+# Interrupteur général — mets à False pour désactiver complètement le
+# circuit breaker (utile en phase de test/observation, à réactiver une
+# fois que tu veux une vraie protection automatique)
+CIRCUIT_BREAKER_ACTIVE = False
+
 CIRCUIT_BREAKER_PERTES_CONSECUTIVES = 10
 
 # Stop-loss journalier : si le profit papier cumulé de la journée descend
