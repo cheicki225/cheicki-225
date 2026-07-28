@@ -379,7 +379,9 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     _etat_papier["nb_trades_total"] += 1
 
     # --- Contrôle instantané unique (pas de délai d'attente) ---
+    _debut_verif = time.time()
     resultat = await orderbook_depth.estimer_execution_reelle(ex_achat, ex_vente, symbol, montant_usdt)
+    duree_verif_ms = (time.time() - _debut_verif) * 1000
 
     ligne = {
         "timestamp": time.time(), "symbole": symbol,
@@ -395,7 +397,7 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     if not liquide:
         _etat_papier["nb_trades_rejetes_liquidite"] += 1
         _ecrire_ligne(ligne)
-        log.info(f"🚫 Trade papier REJETÉ (liquidité insuffisante) : {symbol} {ex_achat}->{ex_vente}")
+        log.info(f"🚫 Trade papier REJETÉ (liquidité insuffisante) : {symbol} {ex_achat}->{ex_vente} | vérif={duree_verif_ms:.0f}ms")
         _enregistrer_resultat_et_verifier_elimination(symbol, succes=False)
         _verifier_circuit_breaker_global(succes=False)
         _enregistrer_score_crypto(symbol, succes=False)
@@ -442,7 +444,7 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         f"🧪 Trade papier {'✅' if succes else '❌'} : {symbol} "
         f"{ex_achat}->{ex_vente} | spread réel={spread_reel_pct:.3f}% "
         f"(affiché={opp.spread_net_pct:.3f}%, double vérif={'OK' if double_verif_ok else 'ÉCHEC'}) "
-        f"| profit net={profit_net_usdt:+.3f}$"
+        f"| profit net={profit_net_usdt:+.3f}$ | vérif={duree_verif_ms:.0f}ms"
     )
 
     try:
@@ -453,7 +455,8 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
             f"{symbol} : {ex_achat} → {ex_vente}\n"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
             f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
-            f"Profit net : {profit_net_usdt:+.3f}$"
+            f"Profit net : {profit_net_usdt:+.3f}$\n"
+            f"⏱️ Temps de vérification : {duree_verif_ms:.0f}ms"
         ))
     except Exception as e:
         log.error(f"Échec notification trade papier : {e}")
