@@ -147,6 +147,261 @@ async def handler_controle(request):
     return _reponse_json({"ok": True, "action": action})
 
 
+async def handler_blacklist(request):
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import health_manager
+    bl = health_manager.charger_blacklist()
+    resultat = [
+        {"symbole": s, "raison": info.get("raison", ""), "detecte_le": info.get("detecte_le")}
+        for s, info in bl.items()
+    ]
+    resultat.sort(key=lambda x: x["detecte_le"] or 0, reverse=True)
+    return _reponse_json(resultat)
+
+
+async def handler_historique(request):
+    """Dernières lignes du CSV complet d'opportunités (persistant, pas juste la session)."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import csv
+    import opportunity_logger
+    if not os.path.exists(opportunity_logger.CSV_PATH):
+        return _reponse_json([])
+
+    with open(opportunity_logger.CSV_PATH, newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+
+    return _reponse_json(lignes[-50:][::-1])
+
+
+async def handler_ml_stats(request):
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import csv
+    import opportunity_logger
+    if not os.path.exists(opportunity_logger.CSV_PATH):
+        return _reponse_json({"total": 0, "confirmees_5s": 0, "taux_confirmation": 0})
+
+    with open(opportunity_logger.CSV_PATH, newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+
+    total = len(lignes)
+    confirmees = sum(1 for l in lignes if l.get("confirmee_5s") == "1")
+    taux = (confirmees / total * 100) if total else 0
+
+    return _reponse_json({
+        "total": total,
+        "confirmees_5s": confirmees,
+        "taux_confirmation": round(taux, 1),
+        "objectif_atteint": total >= 500,
+    })
+
+
+async def handler_transferts(request):
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import csv
+    import paper_trading
+    if not os.path.exists(paper_trading.TRANSFERTS_CSV_PATH):
+        return _reponse_json([])
+
+    with open(paper_trading.TRANSFERTS_CSV_PATH, newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+
+    return _reponse_json(lignes[-30:][::-1])
+
+
+async def handler_erreurs(request):
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    erreurs = list(telegram_menu_bot._capture_erreurs.erreurs)[::-1]
+    return _reponse_json(erreurs)
+
+
+async def handler_config(request):
+    """Seuils et paramètres actuels — aucune donnée sensible (pas de clés API)."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import config
+    return _reponse_json({
+        "seuil_min_inter_exchange_pct": config.SEUIL_MIN_INTER_EXCHANGE_PCT,
+        "seuil_min_triangulaire_pct": config.SEUIL_MIN_TRIANGULAIRE_PCT,
+        "seuil_min_collecte_ml_pct": config.SEUIL_MIN_COLLECTE_ML_PCT,
+        "seuil_ecart_absurde_pct": config.SEUIL_ECART_ABSURDE_PCT,
+        "seuil_persistance_suspecte_sec": config.SEUIL_PERSISTANCE_SUSPECTE_SEC,
+        "ttl_blacklist_sec": config.TTL_BLACKLIST_SEC,
+        "volume_min_usdt": config.VOLUME_MIN_USDT,
+        "min_exchanges": config.MIN_EXCHANGES,
+        "nb_connexions_par_exchange": config.NB_CONNEXIONS_PAR_EXCHANGE,
+        "max_alertes_par_minute": config.MAX_ALERTES_PAR_MINUTE,
+        "cooldown_par_crypto_sec": config.COOLDOWN_PAR_CRYPTO_SEC,
+        "circuit_breaker_active": config.CIRCUIT_BREAKER_ACTIVE,
+        "circuit_breaker_pertes_consecutives": config.CIRCUIT_BREAKER_PERTES_CONSECUTIVES,
+        "stop_loss_journalier_usdt": config.STOP_LOSS_JOURNALIER_USDT,
+        "capital_par_exchange_papier": config.CAPITAL_PAR_EXCHANGE_PAPIER,
+        "seuil_reequilibrage_pct": config.SEUIL_REEQUILIBRAGE_PCT,
+        "frais_transfert_simule_usdt": config.FRAIS_TRANSFERT_SIMULE_USDT,
+        "frais_trading_pct": config.FRAIS_TRADING_PCT,
+    })
+
+
+async def handler_perf_detail(request):
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    opps = [item["opp"] for item in telegram_menu_bot.etat_bot.opportunites_trouvees]
+    inter = [o for o in opps if o.type_arbitrage == "inter_exchange"]
+    tri = [o for o in opps if o.type_arbitrage == "triangulaire"]
+
+    def _moy(liste):
+        return round(sum(o.spread_net_pct for o in liste) / len(liste), 3) if liste else 0
+
+    meilleure = max(opps, key=lambda o: o.spread_net_pct) if opps else None
+
+    return _reponse_json({
+        "total": len(opps),
+        "inter_exchange": {"nb": len(inter), "moyenne_pct": _moy(inter)},
+        "triangulaire": {"nb": len(tri), "moyenne_pct": _moy(tri)},
+        "meilleure": {
+            "symbole": meilleure.symboles[0], "spread_net_pct": round(meilleure.spread_net_pct, 3),
+        } if meilleure else None,
+    })
+
+
+async def handler_config_modifier(request):
+    """POST /api/config avec {"seuil_inter_exchange": 0.5, "seuil_triangulaire": 0.4}"""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    try:
+        data = await request.json()
+    except Exception:
+        return _reponse_json({"erreur": "JSON invalide"}, 400)
+
+    etat = telegram_menu_bot.etat_bot
+    modifie = {}
+
+    if "seuil_inter_exchange" in data:
+        try:
+            valeur = float(data["seuil_inter_exchange"])
+            if not (0 < valeur < 20):
+                raise ValueError()
+            etat.seuil_inter_exchange = valeur
+            modifie["seuil_inter_exchange"] = valeur
+        except (ValueError, TypeError):
+            return _reponse_json({"erreur": "seuil_inter_exchange invalide (0-20)"}, 400)
+
+    if "seuil_triangulaire" in data:
+        try:
+            valeur = float(data["seuil_triangulaire"])
+            if not (0 < valeur < 20):
+                raise ValueError()
+            etat.seuil_triangulaire = valeur
+            modifie["seuil_triangulaire"] = valeur
+        except (ValueError, TypeError):
+            return _reponse_json({"erreur": "seuil_triangulaire invalide (0-20)"}, 400)
+
+    return _reponse_json({"ok": True, "modifie": modifie})
+
+
+async def handler_systeme(request):
+    """Métriques système réelles (CPU/RAM). Pas de GPU — ce bot n'en utilise aucun."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        cpu_pct = psutil.cpu_percent(interval=0.3)
+        cpu_pct_process = process.cpu_percent(interval=0.3)
+        mem = psutil.virtual_memory()
+        mem_process_mb = process.memory_info().rss / (1024 * 1024)
+
+        return _reponse_json({
+            "cpu_systeme_pct": cpu_pct,
+            "cpu_processus_pct": cpu_pct_process,
+            "ram_systeme_pct": mem.percent,
+            "ram_systeme_utilisee_mb": round(mem.used / (1024 * 1024)),
+            "ram_systeme_totale_mb": round(mem.total / (1024 * 1024)),
+            "ram_processus_mb": round(mem_process_mb, 1),
+            "nb_threads": process.num_threads(),
+            "gpu": "N/A — ce bot n'utilise aucun GPU (détection réseau uniquement, pas de calcul IA en direct)",
+        })
+    except ImportError:
+        return _reponse_json({"erreur": "psutil non installé — ajoute-le à requirements.txt"}, 500)
+    except Exception as e:
+        return _reponse_json({"erreur": str(e)}, 500)
+
+
+async def handler_reinitialiser(request):
+    """POST /api/reinitialiser — vide la blacklist + débloque le circuit breaker."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import health_manager
+    import paper_trading
+    health_manager.vider_blacklist()
+    paper_trading.reinitialiser_circuit_breaker()
+    return _reponse_json({"ok": True})
+
+
+async def handler_unblacklist(request):
+    """POST /api/unblacklist avec {"symbole": "BTCUSDT"}"""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import health_manager
+    try:
+        data = await request.json()
+    except Exception:
+        return _reponse_json({"erreur": "JSON invalide"}, 400)
+
+    symbole = (data.get("symbole") or "").strip().upper()
+    if not symbole:
+        return _reponse_json({"erreur": "symbole manquant"}, 400)
+
+    health_manager.retirer_de_la_blacklist(symbole)
+    return _reponse_json({"ok": True, "symbole": symbole})
+
+
+async def handler_top_cryptos(request):
+    """Classement par NOMBRE d'opportunités détectées (différent de top_performers = taux de réussite)."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    compteur = {}
+    for item in telegram_menu_bot.etat_bot.opportunites_trouvees:
+        symbole = item["opp"].symboles[0]
+        compteur[symbole] = compteur.get(symbole, 0) + 1
+    classement = sorted(compteur.items(), key=lambda x: x[1], reverse=True)[:20]
+    return _reponse_json([{"symbole": s, "nb": n} for s, n in classement])
+
+
+async def handler_top_paires(request):
+    """Classement des paires par nombre d'exchanges où elles sont actives simultanément."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    compteur = {}
+    for exchange, symbols in telegram_menu_bot.prix_live_ref.items():
+        for symbole in symbols:
+            compteur[symbole] = compteur.get(symbole, 0) + 1
+    classement = sorted(compteur.items(), key=lambda x: x[1], reverse=True)[:20]
+    return _reponse_json([{"symbole": s, "nb_exchanges": n} for s, n in classement])
+
+
 async def handler_index(request):
     fichier = DOSSIER_STATIC / "index.html"
     if fichier.exists():
@@ -164,6 +419,19 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/papier", handler_papier)
     app.router.add_get("/api/top_performers", handler_top_performers)
     app.router.add_post("/api/controle", handler_controle)
+    app.router.add_get("/api/blacklist", handler_blacklist)
+    app.router.add_get("/api/historique", handler_historique)
+    app.router.add_get("/api/ml_stats", handler_ml_stats)
+    app.router.add_get("/api/transferts", handler_transferts)
+    app.router.add_get("/api/erreurs", handler_erreurs)
+    app.router.add_get("/api/config", handler_config)
+    app.router.add_get("/api/perf_detail", handler_perf_detail)
+    app.router.add_post("/api/config", handler_config_modifier)
+    app.router.add_get("/api/systeme", handler_systeme)
+    app.router.add_post("/api/reinitialiser", handler_reinitialiser)
+    app.router.add_post("/api/unblacklist", handler_unblacklist)
+    app.router.add_get("/api/top_cryptos", handler_top_cryptos)
+    app.router.add_get("/api/top_paires", handler_top_paires)
 
     if DOSSIER_STATIC.exists():
         app.router.add_static("/static/", DOSSIER_STATIC, name="static")
