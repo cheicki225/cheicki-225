@@ -100,6 +100,38 @@
   button.primary { background: var(--teal); color: #05201D; border: none; }
   button.danger { background: rgba(255,92,108,0.14); color: var(--coral); border: none; }
 
+  details.panel { padding: 0; overflow: hidden; }
+  details.panel summary {
+    list-style: none; cursor: pointer; padding: 16px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  details.panel summary::-webkit-details-marker { display: none; }
+  details.panel summary .chev { color: var(--ink-dim); transition: transform 0.2s; font-size: 12px; }
+  details.panel[open] summary .chev { transform: rotate(90deg); }
+  details.panel .panel-body { padding: 0 16px 16px; }
+  .kv-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--panel-border); font-size: 12.5px; }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-key { color: var(--ink-dim); }
+  .kv-val { font-family: var(--mono); font-weight: 600; text-align: right; }
+  .count-pill { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); background: #0E1322; border-radius: 20px; padding: 3px 9px; }
+  .mono-small { font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim); }
+  .err-row { padding: 9px 0; border-bottom: 1px solid var(--panel-border); }
+  .err-row:last-child { border-bottom: none; }
+  .err-lvl { font-family: var(--mono); font-size: 10px; padding: 2px 7px; border-radius: 6px; margin-right: 6px; }
+  .err-lvl.WARNING { background: rgba(245,166,35,0.15); color: var(--amber); }
+  .err-lvl.ERROR { background: rgba(255,92,108,0.15); color: var(--coral); }
+  .err-txt { font-size: 11.5px; color: var(--ink-dim); margin-top: 4px; word-break: break-word; }
+
+  .edit-row { display: flex; gap: 8px; margin-top: 10px; }
+  .edit-row input {
+    flex: 1; background: #0E1322; border: 1px solid var(--panel-border); color: var(--ink);
+    border-radius: 9px; padding: 10px 12px; font-family: var(--mono); font-size: 13px;
+  }
+  .edit-row button { flex: none; padding: 10px 16px; }
+  .save-msg { font-size: 11.5px; margin-top: 6px; }
+  .save-msg.ok { color: var(--teal); }
+  .save-msg.err { color: var(--coral); }
+
   .gate {
     position: fixed; inset: 0; background: var(--bg); z-index: 50;
     display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px;
@@ -155,6 +187,85 @@
       <div id="topList"><div class="empty">Chargement…</div></div>
     </div>
 
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Système (CPU / RAM)</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="systemeDetail"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Modifier les seuils</span><span class="chev">▶</span></summary>
+      <div class="panel-body">
+        <div class="cell-label">Seuil inter-exchange (%)</div>
+        <div class="edit-row">
+          <input type="text" id="inputSeuilInter" inputmode="decimal" placeholder="0.5">
+          <button class="primary" onclick="sauverSeuil('seuil_inter_exchange', 'inputSeuilInter')">Enregistrer</button>
+        </div>
+        <div class="cell-label" style="margin-top:14px;">Seuil triangulaire (%)</div>
+        <div class="edit-row">
+          <input type="text" id="inputSeuilTri" inputmode="decimal" placeholder="0.4">
+          <button class="primary" onclick="sauverSeuil('seuil_triangulaire', 'inputSeuilTri')">Enregistrer</button>
+        </div>
+        <div class="save-msg" id="seuilMsg"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Top cryptos (par fréquence)</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="topCryptosList"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Top paires (disponibilité multi-exchange)</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="topPairesList"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Soldes détaillés par exchange</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="soldesDetail"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Transferts simulés</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="transfertsList"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Paires blacklistées</span><span class="chev">▶</span></summary>
+      <div class="panel-body">
+        <div id="blacklistList"><div class="empty">—</div></div>
+        <div class="edit-row">
+          <input type="text" id="inputUnblacklist" placeholder="SYMBOLE à retirer">
+          <button onclick="retirerBlacklist()">Retirer</button>
+        </div>
+        <div class="save-msg" id="unblacklistMsg"></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Historique complet (CSV)</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="historiqueList"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Collecte de données ML</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="mlStats"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Performance détaillée</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="perfDetail"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Dernières erreurs</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="erreursList"><div class="empty">—</div></div>
+    </details>
+
+    <details class="panel">
+      <summary><span class="panel-title" style="margin:0;">Configuration actuelle</span><span class="chev">▶</span></summary>
+      <div class="panel-body" id="configDetail"><div class="empty">—</div></div>
+    </details>
+
     <div class="panel">
       <div class="panel-title">Contrôles</div>
       <div class="controls">
@@ -162,7 +273,8 @@
         <button class="danger" onclick="controle('arreter')">■ Arrêter</button>
         <button onclick="controle('pause')">⏸ Pause</button>
         <button onclick="controle('reprendre')">▶ Reprendre</button>
-        <button onclick="controle('mode_nuit_toggle')" style="grid-column: span 2;">🌙 Mode nuit ON/OFF</button>
+        <button onclick="controle('mode_nuit_toggle')">🌙 Mode nuit</button>
+        <button class="danger" onclick="reinitialiser()">♻️ Réinitialiser</button>
       </div>
     </div>
   </main>
@@ -212,6 +324,11 @@ async function refresh() {
     exRow.innerHTML = Object.entries(etat.exchanges).map(([ex, n]) =>
       `<span class="exch-chip"><span class="dot ${n > 0 ? 'on' : 'off'}"></span>${ex} · ${n}</span>`
     ).join('');
+
+    const inpInter = document.getElementById('inputSeuilInter');
+    const inpTri = document.getElementById('inputSeuilTri');
+    if (inpInter && document.activeElement !== inpInter) inpInter.value = etat.seuil_inter_exchange;
+    if (inpTri && document.activeElement !== inpTri) inpTri.value = etat.seuil_triangulaire;
 
     const opps = await api('/api/opportunites');
     document.getElementById('tickerTrack').innerHTML = opps.length
@@ -263,6 +380,182 @@ async function boot() {
   document.getElementById('app').classList.remove('hidden');
   await refresh();
   setInterval(refresh, 8000);
+  configurerAccordeons();
+}
+
+function configurerAccordeons() {
+  const map = {
+    systemeDetail: chargerSysteme,
+    topCryptosList: chargerTopCryptos,
+    topPairesList: chargerTopPaires,
+    soldesDetail: chargerSoldesDetail,
+    transfertsList: chargerTransferts,
+    blacklistList: chargerBlacklist,
+    historiqueList: chargerHistorique,
+    mlStats: chargerMlStats,
+    perfDetail: chargerPerfDetail,
+    erreursList: chargerErreurs,
+    configDetail: chargerConfig,
+  };
+  for (const [id, fn] of Object.entries(map)) {
+    const details = document.getElementById(id).closest('details');
+    let charge = false;
+    details.addEventListener('toggle', () => {
+      if (details.open && !charge) { charge = true; fn(); }
+      if (details.open) fn(); // recharge à chaque ouverture pour rester frais
+    });
+  }
+}
+
+async function chargerSysteme() {
+  const s = await api('/api/systeme');
+  if (s.erreur) {
+    document.getElementById('systemeDetail').innerHTML = `<div class="empty">${s.erreur}</div>`;
+    return;
+  }
+  document.getElementById('systemeDetail').innerHTML = `
+    <div class="kv-row"><span class="kv-key">CPU système</span><span class="kv-val">${s.cpu_systeme_pct}%</span></div>
+    <div class="kv-row"><span class="kv-key">CPU du bot</span><span class="kv-val">${s.cpu_processus_pct}%</span></div>
+    <div class="kv-row"><span class="kv-key">RAM système</span><span class="kv-val">${s.ram_systeme_pct}% (${s.ram_systeme_utilisee_mb}/${s.ram_systeme_totale_mb} Mo)</span></div>
+    <div class="kv-row"><span class="kv-key">RAM du bot</span><span class="kv-val">${s.ram_processus_mb} Mo</span></div>
+    <div class="kv-row"><span class="kv-key">Threads actifs</span><span class="kv-val">${s.nb_threads}</span></div>
+    <div class="kv-row"><span class="kv-key">GPU</span><span class="kv-val" style="color:var(--ink-dim); font-size:11px;">${s.gpu}</span></div>
+  `;
+}
+
+async function sauverSeuil(champ, inputId) {
+  const valeur = document.getElementById(inputId).value.trim();
+  const msgEl = document.getElementById('seuilMsg');
+  try {
+    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ [champ]: valeur }) });
+    if (r.erreur) throw new Error(r.erreur);
+    msgEl.textContent = '✅ Enregistré : ' + JSON.stringify(r.modifie);
+    msgEl.className = 'save-msg ok';
+  } catch (e) {
+    msgEl.textContent = '❌ ' + e.message;
+    msgEl.className = 'save-msg err';
+  }
+}
+
+async function retirerBlacklist() {
+  const symbole = document.getElementById('inputUnblacklist').value.trim();
+  const msgEl = document.getElementById('unblacklistMsg');
+  if (!symbole) return;
+  try {
+    await api('/api/unblacklist', { method: 'POST', body: JSON.stringify({ symbole }) });
+    msgEl.textContent = '✅ ' + symbole + ' retiré';
+    msgEl.className = 'save-msg ok';
+    document.getElementById('inputUnblacklist').value = '';
+    chargerBlacklist();
+  } catch (e) {
+    msgEl.textContent = '❌ Erreur';
+    msgEl.className = 'save-msg err';
+  }
+}
+
+async function reinitialiser() {
+  await api('/api/reinitialiser', { method: 'POST', body: '{}' });
+  refresh();
+}
+
+async function chargerTopCryptos() {
+  const t = await api('/api/top_cryptos');
+  document.getElementById('topCryptosList').innerHTML = t.length
+    ? t.map(x => `<div class="row-item"><span class="row-sym">${x.symbole}</span><span class="row-pct">${x.nb}x</span></div>`).join('')
+    : '<div class="empty">Pas encore de données cette session</div>';
+}
+
+async function chargerTopPaires() {
+  const t = await api('/api/top_paires');
+  document.getElementById('topPairesList').innerHTML = t.length
+    ? t.map(x => `<div class="row-item"><span class="row-sym">${x.symbole}</span><span class="row-pct">${x.nb_exchanges}/6</span></div>`).join('')
+    : '<div class="empty">Chargement…</div>';
+}
+
+async function chargerSoldesDetail() {
+  const p = await api('/api/papier');
+  const soldes = Object.entries(p.soldes || {});
+  document.getElementById('soldesDetail').innerHTML = soldes.length
+    ? soldes.map(([ex, montant]) => `<div class="kv-row"><span class="kv-key">${ex}</span><span class="kv-val">${montant.toFixed(2)}$</span></div>`).join('')
+    : '<div class="empty">Pas encore de soldes (attends le premier trade)</div>';
+}
+
+async function chargerTransferts() {
+  const t = await api('/api/transferts');
+  document.getElementById('transfertsList').innerHTML = t.length
+    ? t.map(x => `
+        <div class="row-item">
+          <div><div class="row-sym">${x.exchange_source} → ${x.exchange_destination}</div>
+          <div class="row-path">${x.raison ? x.raison.slice(0, 50) : ''}</div></div>
+          <div class="row-pct">${parseFloat(x.montant_usdt).toFixed(2)}$</div>
+        </div>`).join('')
+    : '<div class="empty">Aucun transfert simulé pour l\\'instant</div>';
+}
+
+async function chargerBlacklist() {
+  const b = await api('/api/blacklist');
+  document.getElementById('blacklistList').innerHTML = b.length
+    ? b.map(x => `
+        <div class="err-row">
+          <span class="row-sym">${x.symbole}</span>
+          <div class="err-txt">${x.raison}</div>
+        </div>`).join('')
+    : '<div class="empty">Aucune paire blacklistée actuellement</div>';
+}
+
+async function chargerHistorique() {
+  const h = await api('/api/historique');
+  document.getElementById('historiqueList').innerHTML = h.length
+    ? `<div class="mono-small" style="margin-bottom:8px;">${h.length} dernières lignes (CSV complet)</div>` +
+      h.slice(0, 20).map(x => `
+        <div class="row-item">
+          <div><div class="row-sym">${x.symboles || x.symbole || '?'}</div>
+          <div class="row-path">${x.type_arbitrage || ''}</div></div>
+          <div class="row-pct">${x.spread_net_pct ? parseFloat(x.spread_net_pct).toFixed(3) + '%' : '—'}</div>
+        </div>`).join('')
+    : '<div class="empty">Historique vide pour l\\'instant</div>';
+}
+
+async function chargerMlStats() {
+  const m = await api('/api/ml_stats');
+  document.getElementById('mlStats').innerHTML = `
+    <div class="kv-row"><span class="kv-key">Opportunités enregistrées</span><span class="kv-val">${m.total}</span></div>
+    <div class="kv-row"><span class="kv-key">Confirmées après 5s</span><span class="kv-val">${m.confirmees_5s} (${m.taux_confirmation}%)</span></div>
+    <div class="kv-row"><span class="kv-key">Objectif entraînement (500+)</span><span class="kv-val">${m.objectif_atteint ? '✅ Atteint' : `⏳ ${500 - m.total} restants`}</span></div>
+  `;
+}
+
+async function chargerPerfDetail() {
+  const p = await api('/api/perf_detail');
+  document.getElementById('perfDetail').innerHTML = `
+    <div class="kv-row"><span class="kv-key">Total opportunités (session)</span><span class="kv-val">${p.total}</span></div>
+    <div class="kv-row"><span class="kv-key">Inter-exchange</span><span class="kv-val">${p.inter_exchange.nb}x · moy ${p.inter_exchange.moyenne_pct}%</span></div>
+    <div class="kv-row"><span class="kv-key">Triangulaire</span><span class="kv-val">${p.triangulaire.nb}x · moy ${p.triangulaire.moyenne_pct}%</span></div>
+    ${p.meilleure ? `<div class="kv-row"><span class="kv-key">Meilleure</span><span class="kv-val">${p.meilleure.symbole} · ${p.meilleure.spread_net_pct}%</span></div>` : ''}
+  `;
+}
+
+async function chargerErreurs() {
+  const e = await api('/api/erreurs');
+  document.getElementById('erreursList').innerHTML = e.length
+    ? e.map(x => `
+        <div class="err-row">
+          <span class="err-lvl ${x.niveau}">${x.niveau}</span>
+          <span class="mono-small">il y a ${fmtAgo(x.timestamp)}</span>
+          <div class="err-txt">${x.texte}</div>
+        </div>`).join('')
+    : '<div class="empty">Aucune erreur enregistrée — bon signe !</div>';
+}
+
+async function chargerConfig() {
+  const c = await api('/api/config');
+  const lignes = Object.entries(c).filter(([k]) => k !== 'frais_trading_pct').map(([k, v]) =>
+    `<div class="kv-row"><span class="kv-key">${k.replaceAll('_', ' ')}</span><span class="kv-val">${v}</span></div>`
+  ).join('');
+  const frais = Object.entries(c.frais_trading_pct || {}).map(([ex, f]) =>
+    `<div class="kv-row"><span class="kv-key">Frais ${ex}</span><span class="kv-val">${f}%</span></div>`
+  ).join('');
+  document.getElementById('configDetail').innerHTML = lignes + frais;
 }
 
 if (TOKEN) { boot(); }
