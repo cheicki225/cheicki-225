@@ -489,7 +489,7 @@ async function chargerTransferts() {
           <div class="row-path">${x.raison ? x.raison.slice(0, 50) : ''}</div></div>
           <div class="row-pct">${parseFloat(x.montant_usdt).toFixed(2)}$</div>
         </div>`).join('')
-    : '<div class="empty">Aucun transfert simulé pour l\\'instant</div>';
+    : '<div class="empty">Aucun transfert simulé pour l\'instant</div>';
 }
 
 async function chargerBlacklist() {
@@ -513,7 +513,7 @@ async function chargerHistorique() {
           <div class="row-path">${x.type_arbitrage || ''}</div></div>
           <div class="row-pct">${x.spread_net_pct ? parseFloat(x.spread_net_pct).toFixed(3) + '%' : '—'}</div>
         </div>`).join('')
-    : '<div class="empty">Historique vide pour l\\'instant</div>';
+    : '<div class="empty">Historique vide pour l\'instant</div>';
 }
 
 async function chargerMlStats() {
