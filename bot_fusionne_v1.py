@@ -14,6 +14,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import permutations
 import websockets
 import aiohttp
@@ -537,6 +538,20 @@ def detecter_arbitrage_triangulaire(exchange: str, triangle: tuple[str, str, str
     return None
 
 
+# BUG CORRIGÉ : detecter_arbitrage_inter_exchange / detecter_arbitrage_triangulaire
+# utilisent par défaut le seuil d'ALERTE (SEUIL_MIN_INTER_EXCHANGE_PCT / TRIANGULAIRE,
+# 0.5%/0.4%), pas le seuil bas de collecte ML (0.05%). Or opportunity_logger.py les
+# rappelle SANS préciser de seuil pour revérifier si une opportunité loggée (souvent
+# sous le seuil d'alerte, puisqu'elle vient de la collecte ML) est encore là 0.5s/2.5s
+# plus tard. Résultat avant fix : la revérification comparait au seuil d'alerte au lieu
+# du seuil de collecte -> quasi aucune opportunité ne pouvait jamais être "confirmée",
+# peu importe si son spread avait vraiment bougé ou pas (confirmee_2s/5s ~100% à zéro,
+# CSV inexploitable pour le ML). Ces deux partials figent le bon seuil (ML) une fois
+# pour toutes, pour que la revérification compare des pommes avec des pommes.
+_detecter_inter_exchange_ml = partial(detecter_arbitrage_inter_exchange, seuil_pct=SEUIL_MIN_COLLECTE_ML_PCT)
+_detecter_triangulaire_ml = partial(detecter_arbitrage_triangulaire, seuil_pct=SEUIL_MIN_COLLECTE_ML_PCT)
+
+
 # ============================================================
 # TRAITEMENT ÉVÉNEMENTIEL — déclenché à CHAQUE prix reçu, pas à intervalle fixe
 # ============================================================
@@ -662,7 +677,7 @@ async def _traiter_opportunites_symbole(symbol: str, log):
 
         # Collecte ML systématique (même sous le seuil réel), en arrière-plan
         asyncio.create_task(opportunity_logger.logger_avec_suivi(
-            opp, detecter_arbitrage_inter_exchange, detecter_arbitrage_triangulaire, None
+            opp, _detecter_inter_exchange_ml, _detecter_triangulaire_ml, None
         ))
 
 
@@ -700,7 +715,7 @@ async def verifier_triangles_exchange(exchange: str):
                 log.debug(f"(ignoré, cooldown 1x/min) {opp}")
 
         asyncio.create_task(opportunity_logger.logger_avec_suivi(
-            opp, detecter_arbitrage_inter_exchange, detecter_arbitrage_triangulaire, triangle
+            opp, _detecter_inter_exchange_ml, _detecter_triangulaire_ml, triangle
         ))
 
 
