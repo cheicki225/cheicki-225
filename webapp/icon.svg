@@ -1,5 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <rect width="100" height="100" rx="20" fill="#0B0F1A"/>
-  <path d="M50 18 L82 50 L50 82 L18 50 Z" fill="none" stroke="#2DD4C8" stroke-width="4"/>
-  <path d="M50 34 L66 50 L50 66 L34 50 Z" fill="#2DD4C8"/>
+  <defs>
+    <linearGradient id="gold" x1="15" y1="10" x2="85" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F4E2A1"/>
+      <stop offset="55%" stop-color="#D9B65C"/>
+      <stop offset="100%" stop-color="#9C7A2E"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="100" height="100" rx="22" fill="#0A0908"/>
+
+  <!-- anneaux radar -->
+  <circle cx="50" cy="50" r="32" fill="none" stroke="url(#gold)" stroke-width="1.4" opacity="0.45"/>
+  <circle cx="50" cy="50" r="22" fill="none" stroke="url(#gold)" stroke-width="1.1" opacity="0.3"/>
+
+  <!-- aiguille / losange d'arbitrage -->
+  <path d="M50 20 L62.5 50 L50 80 L37.5 50 Z" fill="url(#gold)"/>
+
+  <!-- coeur du radar -->
+  <circle cx="50" cy="50" r="5.5" fill="#0A0908"/>
+  <circle cx="50" cy="50" r="5.5" fill="none" stroke="url(#gold)" stroke-width="1.3"/>
 </svg>
