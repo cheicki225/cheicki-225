@@ -127,6 +127,7 @@ def build_main_menu() -> dict:
             [btn("📡 Live signaux", "live_signaux"), btn("🔄 Top paires", "top_paires")],
             [btn("📈 Perf Détail", "perf_detail")],
             [btn("🤖 Stats ML", "stats_ml"), btn("🧪 Mode Papier", "mode_papier")],
+            [btn("📤 Export CSV ML", "export_csv_ml")],
             [btn("🏆 Top Performers", "top_performers")],
             [btn("💼 Soldes fictifs", "soldes_papier"), btn("💸 Transferts", "historique_transferts")],
             [btn("🔑 Config API", "config_api")],
@@ -454,6 +455,62 @@ async def supprimer_message(chat_id, message_id):
         log.warning(f"Impossible de supprimer le message {message_id} : {e}")
 
 
+async def envoyer_document(chat_id, chemin_fichier: str, legende: str = ""):
+    """
+    Envoie un fichier en pièce jointe via l'API Telegram (multipart/form-data).
+    Utilisé pour exporter opportunites_log.csv depuis Railway vers ton PC —
+    le filesystem Railway étant éphémère, c'est le moyen le plus simple de
+    récupérer les données avant qu'un redéploiement ne les efface.
+    """
+    async with _session_avec_dns_force() as session:
+        with open(chemin_fichier, "rb") as f:
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            if legende:
+                form.add_field("caption", legende[:1024])  # limite Telegram sur les légendes
+            form.add_field("document", f, filename=os.path.basename(chemin_fichier))
+            async with session.post(f"{TELEGRAM_API_BASE}/sendDocument", data=form) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.error(f"Échec envoi document Telegram ({resp.status}) : {body[:200]}")
+                    raise RuntimeError(f"Telegram a refusé l'envoi ({resp.status})")
+
+
+async def gerer_export_csv(chat_id, message_id):
+    """
+    Nettoie le CSV (retire les symboles blacklistés a posteriori, pour ne pas
+    entraîner un modèle sur des données polluées par des bugs de flux/collisions
+    de ticker) puis l'envoie en pièce jointe. Callback du bouton "📤 Export CSV ML".
+    """
+    import opportunity_logger
+
+    if not os.path.exists(opportunity_logger.CSV_PATH):
+        await editer_menu(
+            chat_id, message_id,
+            "📤 Aucun fichier opportunites_log.csv pour l'instant — laisse le bot tourner un peu plus longtemps."
+        )
+        return
+
+    avant = apres = None
+    try:
+        import health_manager
+        symboles_a_retirer = health_manager.symboles_blacklistes()
+        avant, apres = opportunity_logger.nettoyer_csv(symboles_a_retirer)
+    except Exception as e:
+        log.warning(f"Nettoyage CSV avant export échoué (envoi du fichier brut à la place) : {e}")
+
+    taille_ko = os.path.getsize(opportunity_logger.CSV_PATH) / 1024
+    legende = f"📤 opportunites_log.csv ({taille_ko:.0f} Ko)"
+    if avant is not None:
+        legende += f"\n🧹 Nettoyé : {avant} → {apres} lignes ({avant - apres} retirées, symboles blacklistés depuis)"
+
+    try:
+        await envoyer_document(chat_id, opportunity_logger.CSV_PATH, legende)
+        await editer_menu(chat_id, message_id, "✅ CSV envoyé ci-dessus. Tu peux maintenant l'entraîner en local.")
+    except Exception as e:
+        await editer_menu(chat_id, message_id, f"❌ Échec de l'envoi : {e}")
+
+
 async def repondre_callback(callback_query_id):
     """Accuse réception du clic (sinon le bouton reste 'en chargement' côté Telegram)."""
     async with _session_avec_dns_force() as session:
@@ -580,6 +637,10 @@ async def demarrer_bot_telegram():
                             f"⚠️ Utilise une clé <b>sans permission de retrait</b>.\n"
                             f"Ton message sera supprimé automatiquement après traitement."
                         )
+                        continue
+
+                    if action == "export_csv_ml":
+                        await gerer_export_csv(chat_id, message_id)
                         continue
 
                     resultat = traiter_action(action, chat_id)
