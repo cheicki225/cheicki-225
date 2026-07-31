@@ -4,8 +4,8 @@
   "description": "Suivi en temps réel du bot d'arbitrage crypto",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0A0908",
-  "theme_color": "#0A0908",
+  "background_color": "#0B0B0F",
+  "theme_color": "#0B0B0F",
   "orientation": "portrait",
   "icons": [
     {
