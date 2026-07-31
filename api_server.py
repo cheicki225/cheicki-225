@@ -30,6 +30,14 @@ def _verifier_auth(request) -> bool:
     return token == API_SECRET
 
 
+def _verifier_auth_ws(request) -> bool:
+    """Les navigateurs ne peuvent pas mettre de header Authorization custom sur le
+    handshake WebSocket — le token passe donc par la query string à la place."""
+    if not API_SECRET:
+        return True
+    return request.query.get("token", "") == API_SECRET
+
+
 def _reponse_json(data, statut=200):
     return web.Response(
         text=json.dumps(data, default=str),
@@ -148,6 +156,44 @@ async def handler_classement_profit(request):
     import paper_trading
     meilleures, pires = paper_trading.classement_profit_par_crypto(limite=10)
     return _reponse_json({"meilleures": meilleures, "pires": pires})
+
+
+async def handler_cryptos(request):
+    """
+    Toutes les cryptos ACTUELLEMENT suivies par le bot (peu importe si elles
+    ont déjà généré un trade), avec le nombre d'exchanges où chacune est
+    disponible et ses stats de rentabilité si elle en a (taux_reussite/
+    profit_total à null sinon — pas de fausse donnée). Le logo est géré
+    côté frontend (CDN d'icônes), pas besoin de le stocker ici.
+    """
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import telegram_menu_bot
+    import paper_trading
+
+    compteur_exchanges = {}
+    for exchange, symbols in telegram_menu_bot.prix_live_ref.items():
+        for symbole in symbols:
+            compteur_exchanges[symbole] = compteur_exchanges.get(symbole, 0) + 1
+
+    stats = paper_trading.stats_toutes_cryptos()
+
+    resultat = []
+    for symbole, nb_exchanges in compteur_exchanges.items():
+        s = stats.get(symbole, {})
+        resultat.append({
+            "symbole": symbole,
+            "nb_exchanges": nb_exchanges,
+            "taux_reussite": s.get("taux_reussite"),
+            "profit_total": s.get("profit_total"),
+            "nb_trades": s.get("nb_trades", 0),
+        })
+
+    # Cryptos avec des vraies données de profit en premier (triées par profit
+    # décroissant), puis le reste par ordre alphabétique
+    resultat.sort(key=lambda x: (x["profit_total"] is None, -(x["profit_total"] or 0), x["symbole"]))
+    return _reponse_json(resultat)
 
 
 async def handler_controle(request):
@@ -439,6 +485,40 @@ async def handler_top_paires(request):
     return _reponse_json([{"symbole": s, "nb_exchanges": n} for s, n in classement])
 
 
+async def handler_ws_spreads(request):
+    """
+    WebSocket — diffusion en direct des écarts d'arbitrage pour le panneau
+    "Cryptos suivies" (comme un exchange, pas un rafraîchissement périodique).
+    Auth via ?token=... dans l'URL (pas de header custom possible sur un
+    handshake WebSocket depuis un navigateur).
+    """
+    if not _verifier_auth_ws(request):
+        return web.Response(status=401, text="non autorisé")
+
+    import spreads_live
+    import json as _json
+
+    ws = web.WebSocketResponse(heartbeat=25)
+    await ws.prepare(request)
+    spreads_live.enregistrer_connexion(ws)
+    log.info(f"WebSocket spreads connecté ({spreads_live.nb_connexions()} client(s) actif(s))")
+
+    try:
+        etat = spreads_live.obtenir_etat_actuel()
+        if etat:
+            await ws.send_str(_json.dumps({"type": "snapshot", "data": etat}))
+
+        async for _msg in ws:
+            pass  # rien n'est attendu du client — juste garder la connexion ouverte
+    except Exception as e:
+        log.debug(f"WebSocket spreads fermé ({e})")
+    finally:
+        spreads_live.retirer_connexion(ws)
+        log.info(f"WebSocket spreads déconnecté ({spreads_live.nb_connexions()} client(s) restant(s))")
+
+    return ws
+
+
 async def handler_index(request):
     fichier = DOSSIER_STATIC / "index.html"
     if fichier.exists():
@@ -472,6 +552,8 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/equity_curve", handler_equity_curve)
     app.router.add_get("/api/trades", handler_trades)
     app.router.add_get("/api/classement_profit", handler_classement_profit)
+    app.router.add_get("/api/cryptos", handler_cryptos)
+    app.router.add_get("/ws/spreads", handler_ws_spreads)
 
     if DOSSIER_STATIC.exists():
         app.router.add_static("/static/", DOSSIER_STATIC, name="static")

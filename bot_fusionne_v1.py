@@ -426,6 +426,7 @@ from config import (
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
 )
 import filtre_ml
+import spreads_live
 
 
 @dataclass
@@ -640,6 +641,15 @@ async def _traiter_opportunites_symbole(symbol: str, log):
         return
 
     seuil_inter_actif = telegram_menu_bot.etat_bot.seuil_inter_exchange
+
+    # Diffusion live (WebSocket, panneau "Cryptos suivies") — le meilleur
+    # écart trouvé pour cette crypto à CE cycle, même s'il est sous le seuil
+    # d'alerte. diffuser_spread() se charge lui-même de ne rien envoyer si
+    # la valeur n'a pas changé depuis la dernière fois (pas de spam).
+    meilleure = max(toutes, key=lambda o: o.spread_net_pct)
+    asyncio.create_task(spreads_live.diffuser_spread(
+        symbol, meilleure.spread_net_pct, meilleure.exchanges, seuil_inter_actif
+    ))
 
     for opp in toutes:
         cle = f"{opp.type_arbitrage}:{'-'.join(opp.exchanges)}:{'-'.join(opp.symboles)}"
