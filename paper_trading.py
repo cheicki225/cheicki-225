@@ -637,6 +637,43 @@ def courbe_equity(limite_points=300):
     return echantillon
 
 
+def classement_profit_par_crypto(limite: int = 10):
+    """
+    Classement des cryptos par PROFIT CUMULÉ (montant réel en $, pas juste
+    taux de réussite) — calculé sur l'historique complet de trades_papier.csv,
+    donc persistant entre les redémarrages (contrairement à _stats_par_crypto
+    qui ne suit que la session en cours).
+
+    Retourne (meilleures, pires) : deux listes triées, chacune au format
+    {symbole, profit_total, nb_trades, nb_gains, nb_pertes}.
+    """
+    valides = _lire_trades_valides()
+    if not valides:
+        return [], []
+
+    par_crypto = {}
+    for l in valides:
+        s = l["symbole"]
+        entree = par_crypto.setdefault(s, {"profit_total": 0.0, "nb_trades": 0, "nb_gains": 0, "nb_pertes": 0})
+        entree["profit_total"] += l["profit_usdt"]
+        entree["nb_trades"] += 1
+        if l["profit_usdt"] > 0:
+            entree["nb_gains"] += 1
+        elif l["profit_usdt"] < 0:
+            entree["nb_pertes"] += 1
+
+    classement = [
+        {"symbole": s, "profit_total": round(v["profit_total"], 3), "nb_trades": v["nb_trades"],
+         "nb_gains": v["nb_gains"], "nb_pertes": v["nb_pertes"]}
+        for s, v in par_crypto.items()
+    ]
+    classement.sort(key=lambda x: x["profit_total"], reverse=True)
+
+    meilleures = [c for c in classement[:limite] if c["profit_total"] > 0]
+    pires = [c for c in reversed(classement[-limite:]) if c["profit_total"] < 0]
+    return meilleures, pires
+
+
 if __name__ == "__main__":
     print(stats_papier())
     print()

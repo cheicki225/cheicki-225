@@ -140,6 +140,16 @@ async def handler_top_performers(request):
     return _reponse_json(classement[:20])
 
 
+async def handler_classement_profit(request):
+    """Classement des cryptos par profit CUMULÉ réel (historique complet, pas juste la session)."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import paper_trading
+    meilleures, pires = paper_trading.classement_profit_par_crypto(limite=10)
+    return _reponse_json({"meilleures": meilleures, "pires": pires})
+
+
 async def handler_controle(request):
     """POST /api/controle avec {"action": "demarrer"|"arreter"|"pause"|"reprendre"}"""
     if not _verifier_auth(request):
@@ -461,6 +471,7 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/top_paires", handler_top_paires)
     app.router.add_get("/api/equity_curve", handler_equity_curve)
     app.router.add_get("/api/trades", handler_trades)
+    app.router.add_get("/api/classement_profit", handler_classement_profit)
 
     if DOSSIER_STATIC.exists():
         app.router.add_static("/static/", DOSSIER_STATIC, name="static")

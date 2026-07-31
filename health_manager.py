@@ -27,11 +27,11 @@ log = logging.getLogger("health_manager")
 BLACKLIST_PATH = stockage.chemin_donnees("paires_blacklist.json")
 
 # Interrupteur général du blacklistage AUTOMATIQUE (persistance suspecte + pannes
-# de connexion). Par défaut activé (comportement historique inchangé). Le
-# désactiver n'efface PAS la blacklist existante et ne bloque PAS le
-# blacklistage/déblacklistage MANUEL (actions explicites) — ça bloque
-# uniquement les ajouts automatiques du bot lui-même.
-_blacklist_auto_active = True
+# de connexion). DÉSACTIVÉ par défaut le 31/07 sur demande. Le désactiver n'efface
+# PAS la blacklist existante et ne bloque PAS le blacklistage/déblacklistage
+# MANUEL (actions explicites) — ça bloque uniquement les ajouts automatiques du
+# bot lui-même. Réactivable via le bouton dans Settings du dashboard.
+_blacklist_auto_active = False
 
 
 def definir_blacklist_active(actif: bool):

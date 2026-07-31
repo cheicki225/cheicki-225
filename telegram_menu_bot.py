@@ -22,6 +22,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 import stockage
+from config import SEUIL_MIN_INTER_EXCHANGE_PCT, SEUIL_MIN_TRIANGULAIRE_PCT
 
 load_dotenv(stockage.chemin_donnees(".env"))
 
@@ -89,8 +90,8 @@ class EtatBot:
         self.en_pause = False
         self.heure_demarrage = time.time()
         self.opportunites_trouvees: list = []
-        self.seuil_inter_exchange = 0.5
-        self.seuil_triangulaire = 0.4
+        self.seuil_inter_exchange = SEUIL_MIN_INTER_EXCHANGE_PCT  # lu depuis config.py — avant : codé en dur à 0.5, ignorait config.py
+        self.seuil_triangulaire = SEUIL_MIN_TRIANGULAIRE_PCT      # idem, était codé en dur à 0.4
         self.mode_nuit = False  # si True, les alertes Telegram sont mises en sourdine (le scan continue)
 
     def uptime_str(self) -> str:

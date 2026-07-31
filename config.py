@@ -11,8 +11,8 @@ dans 5 fichiers différents pour ajuster le comportement du bot.
 # ============================================================
 # SEUILS D'ARBITRAGE (spread net, après frais)
 # ============================================================
-SEUIL_MIN_INTER_EXCHANGE_PCT = 0.5   # % net minimum pour déclencher une alerte Telegram
-SEUIL_MIN_TRIANGULAIRE_PCT = 0.4     # idem pour le triangulaire
+SEUIL_MIN_INTER_EXCHANGE_PCT = 1.5   # % net minimum pour déclencher une alerte Telegram (monté de 0.5% à 1.5% le 31/07)
+SEUIL_MIN_TRIANGULAIRE_PCT = 1.5     # idem pour le triangulaire (était 0.4%)
 
 # Seuil bas séparé pour la COLLECTE DE DONNÉES ML (pas d'alerte, juste logging)
 SEUIL_MIN_COLLECTE_ML_PCT = 0.05
@@ -46,11 +46,14 @@ SEUIL_PANNE_SEC = 150
 TTL_BLACKLIST_SEC = 1 * 3600  # 1 heure
 
 # Tickers courts/génériques à très haut risque de désigner une crypto
-# DIFFÉRENTE selon l'exchange — exclus par précaution dès la découverte
-TICKERS_A_RISQUE = {
-    "U", "A", "S", "T", "C", "H", "G", "W", "F",
-    "AI", "ONE", "IO", "OG", "ID",
-}
+# DIFFÉRENTE selon l'exchange — exclus par précaution dès la découverte.
+# DÉSACTIVÉ le 31/07 sur demande (on laisse tout passer). Liste d'origine
+# gardée en commentaire pour pouvoir réactiver facilement :
+# TICKERS_A_RISQUE = {
+#     "U", "A", "S", "T", "C", "H", "G", "W", "F",
+#     "AI", "ONE", "IO", "OG", "ID",
+# }
+TICKERS_A_RISQUE = set()
 
 
 # ============================================================
@@ -71,8 +74,10 @@ MIN_EXCHANGES = 3                # une paire doit exister sur au moins N exchang
 
 # Volume minimum (24h, en $) sur un exchange pour qu'une paire y soit
 # considérée comme "liquide" — élimine à la source les tokens listés
-# partout mais tradés nulle part (carnet trop fin, faux signaux garantis)
-VOLUME_MIN_USDT = 350_000
+# partout mais tradés nulle part (carnet trop fin, faux signaux garantis).
+# DÉSACTIVÉ le 31/07 sur demande (0 = aucun filtre, tout passe). Était 350_000.
+# ⚠️ Remettre une valeur >0 réactive la protection contre les carnets trop fins.
+VOLUME_MIN_USDT = 0
 
 FRAIS_TRADING_PCT = {
     "binance": 0.10, "bybit": 0.10, "okx": 0.10, "kucoin": 0.10, "bitget": 0.10,
