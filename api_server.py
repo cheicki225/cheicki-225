@@ -99,7 +99,29 @@ async def handler_papier(request):
         "circuit_breaker_actif": paper_trading.circuit_breaker_actif(),
         "stop_loss_actif": paper_trading.stop_loss_journalier_actif(),
         "soldes": paper_trading.obtenir_soldes(),
+        # None (-> null en JSON) si pas encore calculable de façon fiable —
+        # le frontend doit afficher "—" plutôt qu'un chiffre inventé.
+        "profit_factor": paper_trading.calculer_profit_factor(),
+        "average_rr": paper_trading.calculer_average_rr(),
     })
+
+
+async def handler_equity_curve(request):
+    """Courbe d'équité réelle (capital cumulé après chaque trade papier exécuté) — pour le futur graphique Equity Curve."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import paper_trading
+    return _reponse_json(paper_trading.courbe_equity())
+
+
+async def handler_trades(request):
+    """Historique des trades papier exécutés (les plus récents en premier) — pour la future page Trades."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import paper_trading
+    return _reponse_json(paper_trading.historique_trades(limite=100))
 
 
 async def handler_top_performers(request):
@@ -432,6 +454,8 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_post("/api/unblacklist", handler_unblacklist)
     app.router.add_get("/api/top_cryptos", handler_top_cryptos)
     app.router.add_get("/api/top_paires", handler_top_paires)
+    app.router.add_get("/api/equity_curve", handler_equity_curve)
+    app.router.add_get("/api/trades", handler_trades)
 
     if DOSSIER_STATIC.exists():
         app.router.add_static("/static/", DOSSIER_STATIC, name="static")

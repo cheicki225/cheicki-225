@@ -519,6 +519,123 @@ def top_performers(limite=10):
     return "\n".join(lignes)
 
 
+# ============================================================
+# MÉTRIQUES AVANCÉES — Profit Factor, Average R/R, courbe d'équité, historique
+# ============================================================
+# Calculées à partir de trades_papier.csv, PAS inventées. Si les données ne
+# permettent pas un calcul fiable (pas assez de trades, pas encore de perte
+# pour diviser, etc.), ces fonctions retournent None plutôt qu'un chiffre
+# trompeur — mieux vaut ne rien afficher qu'afficher un nombre faux sur un
+# dashboard de trading, même en mode simulation.
+
+def _lire_trades_valides():
+    """
+    Lit trades_papier.csv et ne garde que les lignes avec un profit_usdt
+    exploitable (trades réellement EXÉCUTÉS — les rejets pour liquidité
+    insuffisante ont profit_usdt vide et sont ignorés ici). Triées par
+    timestamp croissant (ordre chronologique).
+    """
+    if not os.path.exists(CSV_PATH):
+        return []
+
+    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+        lignes = list(csv.DictReader(f))
+
+    valides = []
+    for l in lignes:
+        brut = l.get("profit_usdt", "")
+        if brut in ("", None):
+            continue
+        try:
+            l["profit_usdt"] = float(brut)
+            l["timestamp"] = float(l["timestamp"])
+            valides.append(l)
+        except (TypeError, ValueError):
+            continue
+
+    valides.sort(key=lambda l: l["timestamp"])
+    return valides
+
+
+def historique_trades(limite=100):
+    """Derniers trades EXÉCUTÉS (profit connu), les plus récents en premier — pour une future page Trades."""
+    valides = _lire_trades_valides()
+    return list(reversed(valides[-limite:]))
+
+
+def calculer_profit_factor():
+    """
+    Profit Factor = somme des gains / somme des pertes (valeur absolue).
+    Retourne None si aucune perte n'a encore eu lieu (ratio non défini —
+    afficher "infini" serait trompeur) ou s'il n'y a aucun trade exécuté.
+    """
+    valides = _lire_trades_valides()
+    if not valides:
+        return None
+
+    gains = sum(l["profit_usdt"] for l in valides if l["profit_usdt"] > 0)
+    pertes = sum(l["profit_usdt"] for l in valides if l["profit_usdt"] < 0)
+
+    if pertes == 0:
+        return None
+
+    return round(gains / abs(pertes), 2)
+
+
+def calculer_average_rr():
+    """
+    Average R/R (payoff ratio) = gain moyen des trades gagnants / perte
+    moyenne des trades perdants (valeur absolue).
+
+    ⚠️ Ce bot n'a pas de stop-loss PAR TRADE (montant fixe, pas de distance
+    de risque définie individuellement) — ce n'est donc pas un vrai ratio
+    risque/récompense au sens classique (comme sur un compte prop avec SL
+    fixé à l'ouverture). C'est l'approximation standard ("payoff ratio")
+    utilisée par la plupart des dashboards de trading en son absence.
+    Retourne None si pas de gains ou pas de pertes enregistrés.
+    """
+    valides = _lire_trades_valides()
+    gains = [l["profit_usdt"] for l in valides if l["profit_usdt"] > 0]
+    pertes = [l["profit_usdt"] for l in valides if l["profit_usdt"] < 0]
+
+    if not gains or not pertes:
+        return None
+
+    gain_moyen = sum(gains) / len(gains)
+    perte_moyenne = abs(sum(pertes) / len(pertes))
+
+    if perte_moyenne == 0:
+        return None
+
+    return round(gain_moyen / perte_moyenne, 2)
+
+
+def courbe_equity(limite_points=300):
+    """
+    Courbe d'équité réelle : capital cumulé (capital initial + profit net)
+    après chaque trade EXÉCUTÉ, en ordre chronologique. Sous-échantillonne
+    si trop de points pour ne pas envoyer un payload énorme au dashboard
+    (garde toujours le tout premier et le tout dernier point).
+    """
+    valides = _lire_trades_valides()
+    if not valides:
+        return []
+
+    points = []
+    cumul = _etat_papier["capital_initial"]
+    for l in valides:
+        cumul += l["profit_usdt"]
+        points.append({"timestamp": l["timestamp"], "capital": round(cumul, 3)})
+
+    if len(points) <= limite_points:
+        return points
+
+    pas = len(points) / limite_points
+    echantillon = [points[int(i * pas)] for i in range(limite_points - 1)]
+    echantillon.append(points[-1])
+    return echantillon
+
+
 if __name__ == "__main__":
     print(stats_papier())
     print()
