@@ -471,6 +471,16 @@
                 <span class="badge" id="blacklistAutoBadge">—</span>
               </div>
               <button id="blacklistAutoBtn" onclick="toggleBlacklistAuto()" style="width:100%; margin-bottom:14px;">—</button>
+
+              <div class="row-item" style="border-bottom:none; padding-top:0;">
+                <div>
+                  <div class="row-sym">Élimination par performance</div>
+                  <div class="row-path" style="font-family:var(--sans); font-size:11px;">Blacklist une crypto après 5 échecs papier consécutifs.</div>
+                </div>
+                <span class="badge" id="eliminationBadge">—</span>
+              </div>
+              <button id="eliminationBtn" onclick="toggleElimination()" style="width:100%; margin-bottom:14px;">—</button>
+
               <div id="blacklistList"><div class="empty">—</div></div>
               <div class="mono-small" style="margin:14px 0 4px;">Retirer une paire</div>
               <div class="edit-row">
@@ -683,6 +693,11 @@ async function toggleBlacklistAuto() {
   refresh();
 }
 
+async function toggleElimination() {
+  await api('/api/controle', { method: 'POST', body: JSON.stringify({ action: 'elimination_toggle' }) });
+  refresh();
+}
+
 async function refresh() {
   try {
     const etat = await api('/api/etat');
@@ -696,6 +711,15 @@ async function refresh() {
       badgeAuto.className = 'badge ' + (etat.blacklist_active ? 'ok' : 'warn');
       btnAuto.textContent = etat.blacklist_active ? '⏸ Désactiver le blacklistage auto' : '▶ Réactiver le blacklistage auto';
       btnAuto.className = etat.blacklist_active ? 'danger' : 'primary';
+    }
+
+    const badgeElim = document.getElementById('eliminationBadge');
+    const btnElim = document.getElementById('eliminationBtn');
+    if (badgeElim && btnElim) {
+      badgeElim.textContent = etat.elimination_active ? 'Actif' : 'Désactivé';
+      badgeElim.className = 'badge ' + (etat.elimination_active ? 'ok' : 'warn');
+      btnElim.textContent = etat.elimination_active ? '⏸ Désactiver l\'élimination' : '▶ Réactiver l\'élimination';
+      btnElim.className = etat.elimination_active ? 'danger' : 'primary';
     }
 
     const exRow = document.getElementById('exchangeRow');
@@ -862,6 +886,15 @@ function rendreLigneCrypto(x) {
 
 async function chargerCryptos() {
   const c = await api('/api/cryptos');
+  // Positifs groupés ensemble (triés du plus haut au plus bas), puis négatifs
+  // groupés ensemble (du moins négatif au plus négatif), puis les cryptos
+  // sans donnée de variation 24h encore reçue à la toute fin
+  c.sort((a, b) => {
+    if (a.variation_24h_pct === null && b.variation_24h_pct === null) return 0;
+    if (a.variation_24h_pct === null) return 1;
+    if (b.variation_24h_pct === null) return -1;
+    return b.variation_24h_pct - a.variation_24h_pct;
+  });
   document.getElementById('cryptosList').innerHTML = c.length
     ? c.map(rendreLigneCrypto).join('')
     : '<div class="empty">Aucune crypto suivie pour l\'instant</div>';
