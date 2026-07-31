@@ -48,6 +48,13 @@ def _vers_tiret(symbol: str) -> str:
     return symbol
 
 
+def _vers_underscore(symbol: str) -> str:
+    """BTCUSDT -> BTC_USDT (format natif Gate.io)."""
+    if symbol.endswith("USDT"):
+        return f"{symbol[:-4]}_USDT"
+    return symbol
+
+
 async def carnet_binance(symbol: str, limite: int = 20):
     async with _session_avec_dns_force() as session:
         async with session.get(
@@ -112,12 +119,32 @@ async def carnet_bitget(symbol: str, limite: int = 20):
     return bids, asks
 
 
+async def carnet_gateio(symbol: str, limite: int = 20):
+    """
+    Gate.io utilise le format BTC_USDT (underscore) — même conversion que
+    symbol_discovery.py. Manquait jusqu'ici dans CARNET_PAR_EXCHANGE : toute
+    opportunité impliquant gateio recevait 0$ de liquidité par défaut (le
+    carnet n'était JAMAIS interrogé), pas parce que gateio manquait
+    vraiment de profondeur. Corrigé le 31/07.
+    """
+    async with _session_avec_dns_force() as session:
+        async with session.get(
+            "https://api.gateio.ws/api/v4/spot/order_book",
+            params={"currency_pair": _vers_underscore(symbol), "limit": str(limite)},
+        ) as resp:
+            data = await resp.json()
+    bids = [(float(p), float(q)) for p, q in data.get("bids", [])]
+    asks = [(float(p), float(q)) for p, q in data.get("asks", [])]
+    return bids, asks
+
+
 CARNET_PAR_EXCHANGE = {
     "binance": carnet_binance,
     "bybit": carnet_bybit,
     "okx": carnet_okx,
     "kucoin": carnet_kucoin,
     "bitget": carnet_bitget,
+    "gateio": carnet_gateio,
 }
 
 
