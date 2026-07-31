@@ -44,6 +44,7 @@ async def handler_etat(request):
         return _reponse_json({"erreur": "non autorisé"}, 401)
 
     import telegram_menu_bot
+    import health_manager
     etat = telegram_menu_bot.etat_bot
     prix_live_ref = telegram_menu_bot.prix_live_ref
 
@@ -54,6 +55,7 @@ async def handler_etat(request):
         "en_marche": etat.en_marche,
         "en_pause": etat.en_pause,
         "mode_nuit": etat.mode_nuit,
+        "blacklist_active": health_manager.blacklist_active(),
         "uptime": etat.uptime_str(),
         "nb_exchanges_connectes": nb_exchanges,
         "nb_prix_en_cache": nb_prix,
@@ -163,6 +165,9 @@ async def handler_controle(request):
         etat.en_pause = False
     elif action == "mode_nuit_toggle":
         etat.mode_nuit = not etat.mode_nuit
+    elif action == "blacklist_toggle":
+        import health_manager
+        health_manager.definir_blacklist_active(not health_manager.blacklist_active())
     else:
         return _reponse_json({"erreur": "action inconnue"}, 400)
 

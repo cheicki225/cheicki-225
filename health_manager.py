@@ -26,6 +26,23 @@ log = logging.getLogger("health_manager")
 
 BLACKLIST_PATH = stockage.chemin_donnees("paires_blacklist.json")
 
+# Interrupteur général du blacklistage AUTOMATIQUE (persistance suspecte + pannes
+# de connexion). Par défaut activé (comportement historique inchangé). Le
+# désactiver n'efface PAS la blacklist existante et ne bloque PAS le
+# blacklistage/déblacklistage MANUEL (actions explicites) — ça bloque
+# uniquement les ajouts automatiques du bot lui-même.
+_blacklist_auto_active = True
+
+
+def definir_blacklist_active(actif: bool):
+    global _blacklist_auto_active
+    _blacklist_auto_active = bool(actif)
+    log.info(f"Blacklistage automatique : {'activé' if _blacklist_auto_active else 'désactivé'}")
+
+
+def blacklist_active() -> bool:
+    return _blacklist_auto_active
+
 # Chaque entrée : {"debut": timestamp première détection, "dernier_vu": timestamp dernière détection}
 # Le "dernier_vu" permet de tolérer de courtes absences (1-2 cycles) sans
 # réinitialiser tout le compteur — sinon une paire un peu moins liquide
@@ -89,6 +106,9 @@ async def surveiller_sante(prix_live: dict, intervalle_sec: float = 30.0):
     while True:
         await asyncio.sleep(intervalle_sec)
 
+        if not _blacklist_auto_active:
+            continue  # blacklistage auto désactivé — on ne surveille pas les pannes pour autant, juste on n'agit pas
+
         blacklist = charger_blacklist()
         modifie = False
 
@@ -130,6 +150,8 @@ def signaler_opportunite_active(cle_opportunite: str, symbol: str) -> bool:
     duree = maintenant - info["debut"]
 
     if duree > SEUIL_PERSISTANCE_SUSPECTE_SEC:
+        if not _blacklist_auto_active:
+            return False  # blacklistage auto désactivé — on suit toujours la persistance, mais on n'agit pas dessus
         blacklist = charger_blacklist()
         if symbol not in blacklist:
             blacklist[symbol] = {
