@@ -27,9 +27,11 @@ import os
 import time
 from dataclasses import asdict
 
+import stockage
+
 log = logging.getLogger("opportunity_logger")
 
-CSV_PATH = "opportunites_log.csv"
+CSV_PATH = stockage.chemin_donnees("opportunites_log.csv")
 
 COLONNES = [
     "timestamp", "type_arbitrage", "exchanges", "symboles",

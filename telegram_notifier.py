@@ -20,7 +20,9 @@ import os
 import aiohttp
 from dotenv import load_dotenv
 
-load_dotenv()
+import stockage
+
+load_dotenv(stockage.chemin_donnees(".env"))
 
 log = logging.getLogger("telegram")
 

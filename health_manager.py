@@ -16,13 +16,15 @@ import json
 import logging
 import os
 import time
+
+import stockage
 from config import (
     SEUIL_PANNE_SEC, TTL_BLACKLIST_SEC, SEUIL_PERSISTANCE_SUSPECTE_SEC, GRACE_PERIODE_SEC,
 )
 
 log = logging.getLogger("health_manager")
 
-BLACKLIST_PATH = "paires_blacklist.json"
+BLACKLIST_PATH = stockage.chemin_donnees("paires_blacklist.json")
 
 # Chaque entrée : {"debut": timestamp première détection, "dernier_vu": timestamp dernière détection}
 # Le "dernier_vu" permet de tolérer de courtes absences (1-2 cycles) sans

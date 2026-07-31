@@ -17,7 +17,9 @@ en clair une fois enregistrées).
 import os
 import re
 
-ENV_PATH = ".env"
+import stockage
+
+ENV_PATH = stockage.chemin_donnees(".env")
 
 # Certains exchanges (OKX, KuCoin) demandent une passphrase en plus de key/secret
 EXCHANGES_AVEC_PASSPHRASE = {"okx", "kucoin"}

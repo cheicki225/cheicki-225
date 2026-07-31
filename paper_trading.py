@@ -28,6 +28,7 @@ from datetime import date
 
 import orderbook_depth
 import health_manager
+import stockage
 from config import (
     CIRCUIT_BREAKER_PERTES_CONSECUTIVES, CIRCUIT_BREAKER_ACTIVE, STOP_LOSS_JOURNALIER_USDT,
     DOUBLE_VERIFICATION_DELAI_SEC, CAPITAL_PAR_EXCHANGE_PAPIER,
@@ -36,7 +37,7 @@ from config import (
 
 log = logging.getLogger("paper_trading")
 
-CSV_PATH = "trades_papier.csv"
+CSV_PATH = stockage.chemin_donnees("trades_papier.csv")
 COLONNES = [
     "timestamp", "symbole", "exchange_achat", "exchange_vente",
     "montant_usdt", "spread_affiche_pct",
