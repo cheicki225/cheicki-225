@@ -76,6 +76,15 @@ def _formater_message(opp) -> str:
     if score is not None:
         emoji_score = "🟢" if score >= 0.5 else "🟡" if score >= 0.2 else "🔴"
         lignes.append(f"{emoji_score} Confiance ML : {score:.0%} (probabilité que ça tienne 5s)")
+
+    liquidite = getattr(opp, "liquidite_info", None)
+    if liquidite and liquidite.get("montant_demande"):
+        montant_exec = liquidite.get("montant_executable", 0) or 0
+        montant_vise = liquidite["montant_demande"]
+        pct_dispo = min(100, montant_exec / montant_vise * 100) if montant_vise else 0
+        emoji_liq = "🟢" if pct_dispo >= 95 else "🟡" if pct_dispo >= 20 else "🔴"
+        lignes.append(f"{emoji_liq} Liquidité : {montant_exec:.2f}$ / {montant_vise:.0f}$ visés ({pct_dispo:.0f}%)")
+
     return "\n".join(lignes)
 
 

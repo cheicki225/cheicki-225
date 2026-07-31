@@ -47,12 +47,10 @@ COLONNES = [
 
 MONTANT_PAR_TRADE_USDT = 50.0
 
-# En dessous de ce montant réellement exécutable (carnet trop fin même pour
-# une fraction du trade visé), on rejette encore — sinon un carnet quasi
-# vide génèrerait des trades absurdes à 0.02$. Ajouté le 31/07 : le bot
-# trade maintenant avec une liquidité faible en adaptant le montant réel,
-# plutôt que d'exiger 100% du montant visé comme avant.
-MONTANT_MIN_EXECUTABLE_USDT = 5.0
+# Aucun minimum — n'importe quel montant réellement exécutable (même faible)
+# déclenche un trade papier, à prix toujours honnête. Seul un carnet
+# véritablement vide (zéro niveau de prix) bloque encore.
+MONTANT_MIN_EXECUTABLE_USDT = 0.0
 
 # --- 1. Élimination par crypto après échecs consécutifs (déjà existant) ---
 MAX_ECHECS_CONSECUTIFS = 5
@@ -498,13 +496,17 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         prix_vente = resultat["prix_vente_reel"]
         quantite = montant_reel / prix_achat if prix_achat else 0
         montant_vente_brut = quantite * prix_vente
-        note_partiel = f" ⚠️ partiel ({montant_reel:.2f}$ sur {montant_usdt:.2f}$ visés, carnet limité)\n" if liquidite_partielle else ""
+
+        pct_dispo = min(100, montant_reel / montant_usdt * 100) if montant_usdt else 0
+        emoji_liq = "🟢" if pct_dispo >= 95 else "🟡" if pct_dispo >= 20 else "🔴"
+        ligne_liquidite = f"{emoji_liq} Liquidité : {montant_reel:.2f}$ / {montant_usdt:.0f}$ visés ({pct_dispo:.0f}%)\n"
+
         asyncio.create_task(telegram_notifier.envoyer_message_simple(
-            f"🧪 <b>Trade papier {emoji}</b>\n"
-            f"{note_partiel}\n"
+            f"🧪 <b>Trade papier {emoji}</b>\n\n"
             f"{symbol} : {ex_achat} → {ex_vente}\n"
             f"Acheté : {montant_reel:.2f}$ → {quantite:.6g} {base_asset} @ {prix_achat:.6g}$\n"
             f"Vendu : {quantite:.6g} {base_asset} → {montant_vente_brut:.2f}$ @ {prix_vente:.6g}$\n"
+            f"{ligne_liquidite}"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
             f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
             f"Profit net : {profit_net_usdt:+.3f}$ (frais {frais_usdt:.3f}$ inclus)\n"

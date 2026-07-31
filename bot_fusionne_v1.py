@@ -428,6 +428,7 @@ from config import (
 import filtre_ml
 import spreads_live
 import prix_24h
+import orderbook_depth
 
 
 @dataclass
@@ -441,6 +442,7 @@ class OpportuniteArbitrage:
     symboles: list = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
     score_ml: float | None = None  # probabilité (0-1) que l'opportunité tienne 5s, voir filtre_ml.py
+    liquidite_info: dict | None = None  # vraie profondeur de carnet au moment de l'alerte (inter-exchange uniquement)
 
     def __str__(self):
         return (
@@ -692,6 +694,18 @@ async def _traiter_opportunites_symbole(symbol: str, log):
             )
 
             if autorise:
+                # Vraie profondeur de carnet, pour l'afficher DANS l'alerte —
+                # vérification indépendante de celle refaite juste après par
+                # simuler_trade() (double vérification volontaire, pas un doublon
+                # inutile : le carnet peut bouger entre les deux, à quelques ms d'écart)
+                try:
+                    opp.liquidite_info = await orderbook_depth.estimer_execution_reelle(
+                        opp.exchanges[0], opp.exchanges[1], opp.symboles[0], paper_trading.MONTANT_PAR_TRADE_USDT
+                    )
+                except Exception as e:
+                    opp.liquidite_info = None
+                    log.warning(f"⚠️ Vérif liquidité pour l'alerte échouée ({opp.symboles[0]}) : {e}")
+
                 score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
                 log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
                 await envoyer_alerte(opp)  # anti-spam intégré, cooldown 60s par opportunité
