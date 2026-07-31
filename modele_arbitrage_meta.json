@@ -1,0 +1,15 @@
+{
+  "entraine_le": "2026-07-31 08:06:03 UTC",
+  "source_csv": "opportunites_log.csv",
+  "colonnes_features_ordre": [
+    "spread_brut_pct",
+    "frais_total_pct",
+    "spread_net_pct",
+    "nb_exchanges",
+    "est_triangulaire",
+    "heure_utc"
+  ],
+  "accuracy_test": 0.777,
+  "roc_auc_test": 0.8185,
+  "n_lignes_entrainement": 2130
+}

@@ -423,7 +423,9 @@ from config import (
     NB_CONNEXIONS_PAR_EXCHANGE, MIN_EXCHANGES, VOLUME_MIN_USDT,
     SEUIL_CHUTE_PAIRES_ALERTE_PCT, COOLDOWN_ALERTE_CHUTE_SEC,
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
+    FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
 )
+import filtre_ml
 
 
 @dataclass
@@ -436,6 +438,7 @@ class OpportuniteArbitrage:
     exchanges: list = field(default_factory=list)
     symboles: list = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
+    score_ml: float | None = None  # probabilité (0-1) que l'opportunité tienne 5s, voir filtre_ml.py
 
     def __str__(self):
         return (
@@ -656,15 +659,30 @@ async def _traiter_opportunites_symbole(symbol: str, log):
 
         # Alerte réelle uniquement si ça dépasse le vrai seuil ET le quota de débit
         if opp.spread_net_pct >= seuil_inter_actif:
+            # Score ML (probabilité que l'opportunité tienne 5s) — None si le
+            # modèle n'est pas encore entraîné/chargé, aucun impact dans ce cas
+            opp.score_ml = filtre_ml.score_opportunite(opp)
             telegram_menu_bot.etat_bot.enregistrer_opportunite(opp)
+
+            # Ne bloque QUE si FILTRAGE_ML_ACTIF=True dans config.py (par défaut
+            # False — le score est affiché mais ne filtre rien tant que tu ne
+            # l'as pas toi-même activé après avoir jugé le modèle fiable)
+            bloque_par_ml = (
+                FILTRAGE_ML_ACTIF and opp.score_ml is not None and opp.score_ml < SEUIL_ML_CONFIANCE_MIN
+            )
 
             # Un seul appel à _peut_alerter (il réserve le créneau) — réutilisé
             # pour LE LOG, l'alerte Telegram ET le trade papier, pour que tout
             # respecte la même limite d'une fois par crypto par minute
-            autorise = (not telegram_menu_bot.etat_bot.mode_nuit) and _peut_alerter(opp.symboles[0])
+            autorise = (
+                (not telegram_menu_bot.etat_bot.mode_nuit)
+                and _peut_alerter(opp.symboles[0])
+                and not bloque_par_ml
+            )
 
             if autorise:
-                log.info(f"💰 OPPORTUNITÉ : {opp}")
+                score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
+                log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
                 await envoyer_alerte(opp)  # anti-spam intégré, cooldown 60s par opportunité
 
                 # Mode papier : simule l'exécution en arrière-plan (aucun
@@ -672,6 +690,8 @@ async def _traiter_opportunites_symbole(symbol: str, log):
                 # bot aurait vraiment gagné/perdu, profondeur réelle incluse)
                 frais_total = FRAIS_TRADING_PCT.get(opp.exchanges[0], 0.10) + FRAIS_TRADING_PCT.get(opp.exchanges[1], 0.10)
                 asyncio.create_task(paper_trading.simuler_trade(opp, frais_total))
+            elif bloque_par_ml:
+                log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:
                 log.debug(f"(ignoré, cooldown 1x/min) {opp}")
 
@@ -707,10 +727,19 @@ async def verifier_triangles_exchange(exchange: str):
         _dernieres_valeurs_opportunites[cle] = valeur_actuelle
 
         if opp.spread_net_pct >= seuil_tri_actif:
+            opp.score_ml = filtre_ml.score_opportunite(opp)
             telegram_menu_bot.etat_bot.enregistrer_opportunite(opp)
-            if not telegram_menu_bot.etat_bot.mode_nuit and _peut_alerter(opp.symboles[0]):
-                log.info(f"💰 OPPORTUNITÉ : {opp}")
+
+            bloque_par_ml = (
+                FILTRAGE_ML_ACTIF and opp.score_ml is not None and opp.score_ml < SEUIL_ML_CONFIANCE_MIN
+            )
+
+            if not telegram_menu_bot.etat_bot.mode_nuit and _peut_alerter(opp.symboles[0]) and not bloque_par_ml:
+                score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
+                log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
                 await envoyer_alerte(opp)
+            elif bloque_par_ml:
+                log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:
                 log.debug(f"(ignoré, cooldown 1x/min) {opp}")
 

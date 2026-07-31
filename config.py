@@ -129,6 +129,28 @@ STOP_LOSS_JOURNALIER_USDT = -20.0
 DOUBLE_VERIFICATION_DELAI_SEC = 0.5
 
 # ============================================================
+# FILTRE ML (modèle entraîné sur opportunites_log.csv)
+# ============================================================
+# Chemin du modèle entraîné par train_arbitrage_model.py. Si absent (pas
+# encore entraîné) ou si xgboost n'est pas installé, le scoring est
+# simplement désactivé — le bot continue de fonctionner normalement,
+# aucune alerte n'est bloquée par erreur.
+CHEMIN_MODELE_ML = "modele_arbitrage.json"
+
+# False = le score ML est calculé et affiché (Telegram + dashboard) mais
+# NE BLOQUE AUCUNE alerte — comportement par défaut, le plus prudent tant
+# que tu n'as pas toi-même jugé le modèle assez fiable sur la durée.
+# True = les opportunités sous SEUIL_ML_CONFIANCE_MIN ne sont PLUS envoyées
+# en alerte Telegram ni tradées en mode papier (mais restent visibles dans
+# le dashboard/log — rien n'est caché, juste pas alerté).
+FILTRAGE_ML_ACTIF = False
+
+# Score minimum (probabilité 0-1 que l'opportunité soit encore valide 5s
+# après détection) pour passer le filtre si FILTRAGE_ML_ACTIF=True.
+SEUIL_ML_CONFIANCE_MIN = 0.5
+
+
+# ============================================================
 # TRANSFERT DE FONDS ENTRE EXCHANGES (mode papier uniquement pour l'instant)
 # ============================================================
 # Capital fictif de départ par exchange (mode papier)

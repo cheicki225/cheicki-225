@@ -70,6 +70,10 @@ def _formater_message(opp) -> str:
         f"Frais totaux : {opp.frais_total_pct:.3f}%",
         f"<b>Spread NET : {opp.spread_net_pct:.3f}%</b>",
     ]
+    score = getattr(opp, "score_ml", None)
+    if score is not None:
+        emoji_score = "🟢" if score >= 0.5 else "🟡" if score >= 0.2 else "🔴"
+        lignes.append(f"{emoji_score} Confiance ML : {score:.0%} (probabilité que ça tienne 5s)")
     return "\n".join(lignes)
 
 
