@@ -221,7 +221,16 @@
   .crypto-logo-wrap img { width: 20px; height: 20px; }
   .crypto-logo-fallback { display: none; width: 100%; height: 100%; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--violet-2); }
   .crypto-info { flex: 1; min-width: 0; }
+  .crypto-name { font-weight: 400; color: var(--ink-dim); font-size: 12px; }
   .crypto-stats { flex: none; text-align: right; }
+  .crypto-price { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+
+  .trade-row { border-bottom: 1px solid var(--panel-border); }
+  .trade-row:last-child { border-bottom: none; }
+  .trade-row summary { list-style: none; padding: 10px 0; border-bottom: none !important; }
+  .trade-row summary::-webkit-details-marker { display: none; }
+  .trade-detail { padding: 4px 0 14px; }
+  .trade-detail .kv-row { font-size: 12px; padding: 6px 0; }
   .crypto-spread-live { font-size: 12px; margin-bottom: 2px; }
 
   .live-dot {
@@ -635,10 +644,30 @@ function rendreTrades(liste) {
   el.innerHTML = liste.length
     ? liste.slice(0, 50).map(x => {
         const p = parseFloat(x.profit_usdt);
-        return '<div class="row-item">' +
-          '<div><div class="row-sym">' + x.symbole + '</div><div class="row-path">' + x.exchange_achat + ' → ' + x.exchange_vente + ' · il y a ' + fmtAgo(parseFloat(x.timestamp)) + '</div></div>' +
-          '<div class="row-pct" style="color:' + (p >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (p >= 0 ? '+' : '') + p.toFixed(3) + '$</div>' +
-        '</div>';
+        const montant = parseFloat(x.montant_usdt);
+        const prixAchat = parseFloat(x.prix_achat_reel);
+        const prixVente = parseFloat(x.prix_vente_reel);
+        const spreadReel = parseFloat(x.spread_reel_pct);
+        const spreadAffiche = parseFloat(x.spread_affiche_pct);
+        const frais = parseFloat(x.frais_usdt);
+        const verifOk = x.double_verification_ok === 'True' || x.double_verification_ok === true;
+        const ticker = x.symbole.endsWith('USDT') ? x.symbole.slice(0, -4) : x.symbole;
+        const quantite = prixAchat ? montant / prixAchat : 0;
+        const montantVente = quantite * prixVente;
+
+        return '<details class="trade-row">' +
+          '<summary class="row-item" style="cursor:pointer;">' +
+            '<div><div class="row-sym">' + x.symbole + '</div><div class="row-path">' + x.exchange_achat + ' → ' + x.exchange_vente + ' · il y a ' + fmtAgo(parseFloat(x.timestamp)) + '</div></div>' +
+            '<div class="row-pct" style="color:' + (p >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (p >= 0 ? '+' : '') + p.toFixed(3) + '$</div>' +
+          '</summary>' +
+          '<div class="trade-detail">' +
+            '<div class="kv-row"><span class="kv-key">Acheté</span><span class="kv-val">' + montant.toFixed(2) + '$ → ' + quantite.toFixed(6) + ' ' + ticker + ' @ ' + prixAchat.toFixed(6) + '$</span></div>' +
+            '<div class="kv-row"><span class="kv-key">Vendu</span><span class="kv-val">' + quantite.toFixed(6) + ' ' + ticker + ' → ' + montantVente.toFixed(2) + '$ @ ' + prixVente.toFixed(6) + '$</span></div>' +
+            '<div class="kv-row"><span class="kv-key">Spread réel</span><span class="kv-val">' + spreadReel.toFixed(3) + '% (affiché ' + spreadAffiche.toFixed(3) + '%)</span></div>' +
+            '<div class="kv-row"><span class="kv-key">Double vérif</span><span class="kv-val" style="color:' + (verifOk ? 'var(--green)' : 'var(--red)') + '">' + (verifOk ? 'OK' : 'ÉCHEC') + '</span></div>' +
+            '<div class="kv-row"><span class="kv-key">Profit net</span><span class="kv-val" style="color:' + (p >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (p >= 0 ? '+' : '') + p.toFixed(3) + '$ (frais ' + frais.toFixed(3) + '$ inclus)</span></div>' +
+          '</div>' +
+        '</details>';
       }).join('')
     : '<div class="empty">Aucun trade exécuté pour l\'instant</div>';
 }
@@ -783,6 +812,12 @@ function configurerAccordeons() {
   });
 }
 
+let cryptoManifest = {};
+fetch('https://cdn.jsdelivr.net/npm/cryptocurrency-icons/manifest.json')
+  .then(r => r.ok ? r.json() : [])
+  .then(liste => { liste.forEach(c => { cryptoManifest[c.symbol.toUpperCase()] = c.name; }); })
+  .catch(() => {}); // pas grave si ça échoue — on retombera juste sur le ticker seul
+
 function crypto_icon_error(imgEl) {
   if (imgEl.dataset.fallback === '1') {
     imgEl.style.display = 'none';
@@ -794,23 +829,33 @@ function crypto_icon_error(imgEl) {
 }
 
 function rendreLigneCrypto(x) {
-  const ticker = (x.symbole.endsWith('USDT') ? x.symbole.slice(0, -4) : x.symbole).toLowerCase();
-  const iconUrl = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/' + ticker + '.svg';
+  const ticker = (x.symbole.endsWith('USDT') ? x.symbole.slice(0, -4) : x.symbole).toUpperCase();
+  const iconUrl = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/' + ticker.toLowerCase() + '.svg';
+  const nomComplet = cryptoManifest[ticker] || '';
+
+  const prixTxt = x.prix !== null ? '$' + x.prix.toLocaleString('fr-FR', { maximumFractionDigits: x.prix < 1 ? 6 : 2 }) : '—';
+  const variationTxt = x.variation_24h_pct !== null
+    ? (x.variation_24h_pct >= 0 ? '+' : '') + x.variation_24h_pct.toFixed(2) + '%'
+    : '—';
+  const couleurVariation = x.variation_24h_pct === null ? 'var(--ink-dim)' : (x.variation_24h_pct >= 0 ? 'var(--green)' : 'var(--red)');
+
   const taux = x.taux_reussite !== null ? x.taux_reussite + '%' : '—';
   const profit = x.profit_total !== null ? (x.profit_total >= 0 ? '+' : '') + x.profit_total.toFixed(2) + '$' : '—';
   const couleurProfit = x.profit_total === null ? 'var(--ink-dim)' : (x.profit_total >= 0 ? 'var(--green)' : 'var(--red)');
+
   return '<div class="crypto-row">' +
     '<div class="crypto-logo-wrap">' +
       '<img src="' + iconUrl + '" alt="" onerror="crypto_icon_error(this)">' +
-      '<div class="crypto-logo-fallback">' + x.symbole.charAt(0) + '</div>' +
+      '<div class="crypto-logo-fallback">' + ticker.charAt(0) + '</div>' +
     '</div>' +
     '<div class="crypto-info">' +
-      '<div class="row-sym">' + x.symbole + '</div>' +
-      '<div class="row-path">' + x.nb_exchanges + ' exch. · taux ' + taux + '</div>' +
+      '<div class="row-sym">' + ticker + (nomComplet ? ' <span class="crypto-name">' + nomComplet + '</span>' : '') + '</div>' +
+      '<div class="row-path">' + x.nb_exchanges + ' exch. · ML ' + taux + ' · hist. <span style="color:' + couleurProfit + '">' + profit + '</span></div>' +
     '</div>' +
     '<div class="crypto-stats">' +
-      '<div class="crypto-spread-live" data-symbole="' + x.symbole + '" style="color:var(--ink-dim);">—</div>' +
-      '<div class="row-pct" style="color:' + couleurProfit + '">' + profit + '</div>' +
+      '<div class="crypto-price">' + prixTxt + '</div>' +
+      '<div class="row-pct" style="color:' + couleurVariation + '">' + variationTxt + '</div>' +
+      '<div class="crypto-spread-live" data-symbole="' + x.symbole + '" style="color:var(--ink-dim);">spread —</div>' +
     '</div>' +
   '</div>';
 }
@@ -834,7 +879,7 @@ function appliquerSpreadsConnus() {
   document.querySelectorAll('.crypto-spread-live').forEach(el => {
     const d = wsSpreadsData[el.dataset.symbole];
     if (!d) return;
-    el.textContent = d.spread_net_pct.toFixed(3) + '%';
+    el.textContent = 'spread ' + d.spread_net_pct.toFixed(3) + '%';
     el.style.color = d.au_dessus_seuil ? 'var(--green)' : 'var(--ink-dim)';
   });
 }
