@@ -424,6 +424,14 @@
           <details class="panel glass">
             <summary><span class="panel-title" style="margin:0;">Paires blacklistées</span><span class="chev">▶</span></summary>
             <div class="panel-body">
+              <div class="row-item" style="border-bottom:none; padding-top:0;">
+                <div>
+                  <div class="row-sym">Blacklistage automatique</div>
+                  <div class="row-path" style="font-family:var(--sans); font-size:11px;">Persistance suspecte + pannes de connexion. Le manuel reste toujours possible.</div>
+                </div>
+                <span class="badge" id="blacklistAutoBadge">—</span>
+              </div>
+              <button id="blacklistAutoBtn" onclick="toggleBlacklistAuto()" style="width:100%; margin-bottom:14px;">—</button>
               <div id="blacklistList"><div class="empty">—</div></div>
               <div class="mono-small" style="margin:14px 0 4px;">Retirer une paire</div>
               <div class="edit-row">
@@ -594,11 +602,25 @@ function filtrerTrades() {
   rendreTrades(q ? data.filter(x => x.symbole.toUpperCase().includes(q)) : data);
 }
 
+async function toggleBlacklistAuto() {
+  await api('/api/controle', { method: 'POST', body: JSON.stringify({ action: 'blacklist_toggle' }) });
+  refresh();
+}
+
 async function refresh() {
   try {
     const etat = await api('/api/etat');
     document.getElementById('statusHeadline').textContent =
       etat.en_pause ? 'En pause' : (etat.en_marche ? 'En marche · ' + etat.uptime : 'Arrêté');
+
+    const badgeAuto = document.getElementById('blacklistAutoBadge');
+    const btnAuto = document.getElementById('blacklistAutoBtn');
+    if (badgeAuto && btnAuto) {
+      badgeAuto.textContent = etat.blacklist_active ? 'Actif' : 'Désactivé';
+      badgeAuto.className = 'badge ' + (etat.blacklist_active ? 'ok' : 'warn');
+      btnAuto.textContent = etat.blacklist_active ? '⏸ Désactiver le blacklistage auto' : '▶ Réactiver le blacklistage auto';
+      btnAuto.className = etat.blacklist_active ? 'danger' : 'primary';
+    }
 
     const exRow = document.getElementById('exchangeRow');
     exRow.innerHTML = Object.entries(etat.exchanges).map(([ex, n]) =>
