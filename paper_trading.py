@@ -451,12 +451,19 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     try:
         import telegram_notifier
         emoji = "✅" if succes else "❌"
+        base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
+        prix_achat = resultat["prix_achat_reel"]
+        prix_vente = resultat["prix_vente_reel"]
+        quantite = montant_usdt / prix_achat if prix_achat else 0
+        montant_vente_brut = quantite * prix_vente
         asyncio.create_task(telegram_notifier.envoyer_message_simple(
             f"🧪 <b>Trade papier {emoji}</b>\n\n"
             f"{symbol} : {ex_achat} → {ex_vente}\n"
+            f"Acheté : {montant_usdt:.2f}$ → {quantite:.6g} {base_asset} @ {prix_achat:.6g}$\n"
+            f"Vendu : {quantite:.6g} {base_asset} → {montant_vente_brut:.2f}$ @ {prix_vente:.6g}$\n"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
             f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
-            f"Profit net : {profit_net_usdt:+.3f}$\n"
+            f"Profit net : {profit_net_usdt:+.3f}$ (frais {frais_usdt:.3f}$ inclus)\n"
             f"⏱️ Temps de vérification : {duree_verif_ms:.0f}ms"
         ))
     except Exception as e:
@@ -466,7 +473,7 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
 
 
 def stats_papier():
-    """Résumé complet du mode papier — profit, taux de réussite, circuit breaker, stop-loss."""
+    """Résumé complet du mode papier — profit, taux de réussite, circuit breaker, stop-loss, derniers trades en détail."""
     _reset_jour_si_necessaire()
     e = _etat_papier
     capital_actuel = e["capital_initial"] + e["profit_cumule_usdt"]
@@ -475,6 +482,42 @@ def stats_papier():
 
     statut_cb = "🚨 ACTIF (trades papier suspendus)" if _circuit_breaker_actif else "🟢 OK"
     statut_sl = "🛑 ACTIF (trades suspendus)" if _jour_actuel["stop_loss_declenche"] else "🟢 OK"
+
+    # Détail des derniers trades — même niveau d'info que l'alerte Telegram
+    # envoyée au moment du trade (voir simuler_trade), limité à 3 pour
+    # rester largement sous la limite de 4096 caractères d'un message Telegram
+    derniers = historique_trades(limite=3)
+    if derniers:
+        blocs_trades = []
+        for t in derniers:
+            symbole = t["symbole"]
+            ticker = symbole[:-4] if symbole.endswith("USDT") else symbole
+            try:
+                montant = float(t["montant_usdt"])
+                prix_achat = float(t["prix_achat_reel"])
+                prix_vente = float(t["prix_vente_reel"])
+                spread_reel = float(t["spread_reel_pct"])
+                spread_affiche = float(t["spread_affiche_pct"])
+                frais = float(t["frais_usdt"])
+            except (TypeError, ValueError):
+                continue  # ligne CSV corrompue, on l'ignore plutôt que planter tout l'affichage
+            profit = t["profit_usdt"]  # déjà float via historique_trades()
+            verif_ok = str(t.get("double_verification_ok")) == "True"
+            quantite = montant / prix_achat if prix_achat else 0
+            montant_vente = quantite * prix_vente
+            emoji = "✅" if profit >= 0 else "❌"
+
+            blocs_trades.append(
+                f"{emoji} <b>{symbole}</b> ({t['exchange_achat']} → {t['exchange_vente']})\n"
+                f"Acheté : {montant:.2f}$ → {quantite:.6g} {ticker} @ {prix_achat:.6g}$\n"
+                f"Vendu : {quantite:.6g} {ticker} → {montant_vente:.2f}$ @ {prix_vente:.6g}$\n"
+                f"Spread réel : {spread_reel:.3f}% (affiché {spread_affiche:.3f}%)\n"
+                f"Double vérif : {'OK' if verif_ok else 'ÉCHEC'}\n"
+                f"Profit net : {profit:+.3f}$ (frais {frais:.3f}$ inclus)"
+            )
+        texte_trades = "\n\n📋 <b>DERNIERS TRADES</b>\n\n" + "\n\n".join(blocs_trades) if blocs_trades else ""
+    else:
+        texte_trades = "\n\n📋 Aucun trade exécuté pour l'instant."
 
     return (
         f"🧪 <b>MODE PAPIER (simulation)</b>\n\n"
@@ -492,6 +535,7 @@ def stats_papier():
         f"Stop-loss journalier : {statut_sl}\n"
         f"Profit du jour : {_jour_actuel['profit_du_jour']:+.3f}$ (seuil : {STOP_LOSS_JOURNALIER_USDT}$)\n\n"
         f"⚠️ Simulation uniquement — aucun argent réel engagé."
+        f"{texte_trades}"
     )
 
 
@@ -637,20 +681,14 @@ def courbe_equity(limite_points=300):
     return echantillon
 
 
-def classement_profit_par_crypto(limite: int = 10):
+def _agreger_profit_par_crypto() -> dict:
     """
-    Classement des cryptos par PROFIT CUMULÉ (montant réel en $, pas juste
-    taux de réussite) — calculé sur l'historique complet de trades_papier.csv,
-    donc persistant entre les redémarrages (contrairement à _stats_par_crypto
-    qui ne suit que la session en cours).
-
-    Retourne (meilleures, pires) : deux listes triées, chacune au format
-    {symbole, profit_total, nb_trades, nb_gains, nb_pertes}.
+    Agrège trades_papier.csv par symbole. Retourne
+    {symbole: {profit_total, nb_trades, nb_gains, nb_pertes}} — utilisé à la
+    fois par classement_profit_par_crypto() (top/bottom N) et
+    stats_toutes_cryptos() (liste complète, pour la page Cryptos suivies).
     """
     valides = _lire_trades_valides()
-    if not valides:
-        return [], []
-
     par_crypto = {}
     for l in valides:
         s = l["symbole"]
@@ -661,6 +699,45 @@ def classement_profit_par_crypto(limite: int = 10):
             entree["nb_gains"] += 1
         elif l["profit_usdt"] < 0:
             entree["nb_pertes"] += 1
+    return par_crypto
+
+
+def stats_toutes_cryptos() -> dict:
+    """
+    {symbole: {taux_reussite, profit_total, nb_trades}} pour TOUTE crypto
+    ayant déjà généré au moins un trade papier — taux_reussite vient de la
+    session en cours (_stats_par_crypto), profit_total de l'historique
+    complet persistant (trades_papier.csv). None si pas encore de donnée
+    exploitable pour cette métrique précise (jamais un chiffre inventé).
+    """
+    profits = _agreger_profit_par_crypto()
+    tous_symboles = set(profits.keys()) | set(_stats_par_crypto.keys())
+
+    resultat = {}
+    for s in tous_symboles:
+        session = _stats_par_crypto.get(s, {"total": 0, "reussis": 0})
+        p = profits.get(s, {"profit_total": 0.0, "nb_trades": 0})
+        resultat[s] = {
+            "taux_reussite": round(session["reussis"] / session["total"] * 100, 1) if session["total"] > 0 else None,
+            "profit_total": round(p["profit_total"], 3) if p["nb_trades"] > 0 else None,
+            "nb_trades": p["nb_trades"],
+        }
+    return resultat
+
+
+def classement_profit_par_crypto(limite: int = 10):
+    """
+    Classement des cryptos par PROFIT CUMULÉ (montant réel en $, pas juste
+    taux de réussite) — calculé sur l'historique complet de trades_papier.csv,
+    donc persistant entre les redémarrages (contrairement à _stats_par_crypto
+    qui ne suit que la session en cours).
+
+    Retourne (meilleures, pires) : deux listes triées, chacune au format
+    {symbole, profit_total, nb_trades, nb_gains, nb_pertes}.
+    """
+    par_crypto = _agreger_profit_par_crypto()
+    if not par_crypto:
+        return [], []
 
     classement = [
         {"symbole": s, "profit_total": round(v["profit_total"], 3), "nb_trades": v["nb_trades"],

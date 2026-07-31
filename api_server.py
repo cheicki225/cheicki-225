@@ -171,6 +171,7 @@ async def handler_cryptos(request):
 
     import telegram_menu_bot
     import paper_trading
+    import prix_24h
 
     compteur_exchanges = {}
     for exchange, symbols in telegram_menu_bot.prix_live_ref.items():
@@ -182,12 +183,15 @@ async def handler_cryptos(request):
     resultat = []
     for symbole, nb_exchanges in compteur_exchanges.items():
         s = stats.get(symbole, {})
+        p24 = prix_24h.obtenir(symbole)
         resultat.append({
             "symbole": symbole,
             "nb_exchanges": nb_exchanges,
             "taux_reussite": s.get("taux_reussite"),
             "profit_total": s.get("profit_total"),
             "nb_trades": s.get("nb_trades", 0),
+            "prix": p24["prix"] if p24 else None,
+            "variation_24h_pct": round(p24["variation_24h_pct"], 2) if p24 else None,
         })
 
     # Cryptos avec des vraies données de profit en premier (triées par profit

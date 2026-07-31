@@ -427,6 +427,7 @@ from config import (
 )
 import filtre_ml
 import spreads_live
+import prix_24h
 
 
 @dataclass
@@ -924,6 +925,7 @@ async def main():
     tasks.append(asyncio.create_task(telegram_menu_bot.demarrer_bot_telegram()))
     tasks.append(asyncio.create_task(health_manager.surveiller_sante(prix_live)))
     tasks.append(asyncio.create_task(api_server.demarrer_serveur_web()))
+    tasks.append(asyncio.create_task(prix_24h.boucle_rafraichissement()))
 
     await asyncio.gather(*tasks)
 
