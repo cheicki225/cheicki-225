@@ -350,6 +350,20 @@
           </div>
 
           <div class="panel glass">
+            <div class="panel-title">Taille réelle des trades</div>
+            <div class="sub-stat" style="margin-bottom:12px;">Un bon taux global peut être tiré par des micro-trades faciles — comparer les deux colonnes ci-dessous révèle si c'est le cas.</div>
+            <div class="stat-grid">
+              <div class="cell"><div class="cell-label">Montant moyen</div><div class="cell-val" id="montantMoyenVal">—</div></div>
+              <div class="cell"><div class="cell-label">Trades pleins</div><div class="cell-val" id="nbPleinsVal">—</div></div>
+              <div class="cell"><div class="cell-label">Trades partiels</div><div class="cell-val" id="nbPartielsVal">—</div></div>
+            </div>
+            <div class="grid2">
+              <div class="cell"><div class="cell-label">Réussite (pleins)</div><div class="cell-val" id="tauxPleinsVal">—</div></div>
+              <div class="cell"><div class="cell-label">Réussite (partiels)</div><div class="cell-val" id="tauxPartielsVal">—</div></div>
+            </div>
+          </div>
+
+          <div class="panel glass">
             <div class="panel-title">Contrôles</div>
             <div class="controls">
               <button class="primary" onclick="controle('demarrer')">▶ Démarrer</button>
@@ -769,6 +783,17 @@ async function refresh() {
       ? '<span class="badge warn">Actif</span>' : '<span class="badge ok">OK</span>';
     document.getElementById('slStatus').innerHTML = p.stop_loss_actif
       ? '<span class="badge warn">Actif</span>' : '<span class="badge ok">OK</span>';
+
+    const tt = await api('/api/taille_trades');
+    document.getElementById('montantMoyenVal').textContent = tt.montant_moyen !== null ? tt.montant_moyen.toFixed(2) + '$' : '—';
+    document.getElementById('nbPleinsVal').textContent = tt.nb_pleins;
+    document.getElementById('nbPartielsVal').textContent = tt.nb_partiels;
+    const tpEl = document.getElementById('tauxPleinsVal');
+    tpEl.textContent = tt.taux_reussite_pleins !== null ? tt.taux_reussite_pleins + '%' : '—';
+    tpEl.className = 'cell-val' + (tt.taux_reussite_pleins !== null ? (tt.taux_reussite_pleins >= 50 ? ' pos' : ' neg') : '');
+    const tpaEl = document.getElementById('tauxPartielsVal');
+    tpaEl.textContent = tt.taux_reussite_partiels !== null ? tt.taux_reussite_partiels + '%' : '—';
+    tpaEl.className = 'cell-val' + (tt.taux_reussite_partiels !== null ? (tt.taux_reussite_partiels >= 50 ? ' pos' : ' neg') : '');
 
     const top = await api('/api/top_performers');
     document.getElementById('topList').innerHTML = top.length
