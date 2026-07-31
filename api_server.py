@@ -53,6 +53,7 @@ async def handler_etat(request):
 
     import telegram_menu_bot
     import health_manager
+    import paper_trading
     etat = telegram_menu_bot.etat_bot
     prix_live_ref = telegram_menu_bot.prix_live_ref
 
@@ -64,6 +65,7 @@ async def handler_etat(request):
         "en_pause": etat.en_pause,
         "mode_nuit": etat.mode_nuit,
         "blacklist_active": health_manager.blacklist_active(),
+        "elimination_active": paper_trading.elimination_active(),
         "uptime": etat.uptime_str(),
         "nb_exchanges_connectes": nb_exchanges,
         "nb_prix_en_cache": nb_prix,
@@ -228,6 +230,9 @@ async def handler_controle(request):
     elif action == "blacklist_toggle":
         import health_manager
         health_manager.definir_blacklist_active(not health_manager.blacklist_active())
+    elif action == "elimination_toggle":
+        import paper_trading
+        paper_trading.definir_elimination_active(not paper_trading.elimination_active())
     else:
         return _reponse_json({"erreur": "action inconnue"}, 400)
 

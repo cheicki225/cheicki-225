@@ -73,7 +73,7 @@ _stats_par_crypto = {}  # symbole -> {"reussis": N, "total": N}
 
 # --- Soldes fictifs par exchange (pour le rééquilibrage simulé) ---
 _soldes_virtuels = {}  # exchange -> solde USDT fictif
-TRANSFERTS_CSV_PATH = "transferts_papier.csv"
+TRANSFERTS_CSV_PATH = stockage.chemin_donnees("transferts_papier.csv")
 TRANSFERTS_COLONNES = [
     "timestamp", "exchange_source", "exchange_destination",
     "montant_usdt", "frais_usdt", "reseau", "raison",
@@ -126,8 +126,26 @@ def reinitialiser_circuit_breaker():
     log.info("♻️ Circuit breaker réinitialisé manuellement")
 
 
+# Interrupteur pour l'élimination automatique par performance (5 échecs
+# consécutifs -> blacklist). DÉSACTIVÉ par défaut le 31/07 sur demande —
+# toutes les cryptos doivent pouvoir continuer à trader même après des
+# échecs répétés. Le compteur d'échecs continue d'être suivi en interne
+# même désactivé (pour les stats), juste aucune action n'est prise dessus.
+_elimination_performance_active = False
+
+
+def definir_elimination_active(actif: bool):
+    global _elimination_performance_active
+    _elimination_performance_active = bool(actif)
+    log.info(f"Élimination par performance : {'activée' if _elimination_performance_active else 'désactivée'}")
+
+
+def elimination_active() -> bool:
+    return _elimination_performance_active
+
+
 def _enregistrer_resultat_et_verifier_elimination(symbol, succes):
-    """Élimination par crypto après MAX_ECHECS_CONSECUTIFS échecs d'affilée (inchangé)."""
+    """Élimination par crypto après MAX_ECHECS_CONSECUTIFS échecs d'affilée — désactivable, voir elimination_active()."""
     if succes:
         _echecs_consecutifs[symbol] = 0
         return
@@ -136,6 +154,11 @@ def _enregistrer_resultat_et_verifier_elimination(symbol, succes):
     nb = _echecs_consecutifs[symbol]
 
     if nb >= MAX_ECHECS_CONSECUTIFS:
+        _echecs_consecutifs[symbol] = 0  # reset le compteur dans tous les cas, actif ou pas
+
+        if not _elimination_performance_active:
+            return  # suivi désactivé -> aucune action, la crypto continue de trader normalement
+
         if symbol not in health_manager.symboles_blacklistes():
             health_manager.blacklister_manuellement(
                 symbol,
@@ -144,7 +167,6 @@ def _enregistrer_resultat_et_verifier_elimination(symbol, succes):
             )
             _etat_papier["nb_cryptos_eliminees"] += 1
             log.warning(f"🗑️ {symbol} ÉLIMINÉE après {nb} échecs papier consécutifs")
-        _echecs_consecutifs[symbol] = 0
 
 
 def _verifier_circuit_breaker_global(succes):
