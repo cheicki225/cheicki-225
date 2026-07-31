@@ -170,38 +170,49 @@ def prix_execution_moyen(niveaux: list, montant_usdt: float) -> tuple:
 
 async def estimer_execution_reelle(exchange_achat: str, exchange_vente: str, symbol: str, montant_usdt: float):
     """
-    Récupère les vrais carnets des deux exchanges et calcule le spread NET
-    réellement obtenu pour un montant donné (pas le spread théorique du top-of-book).
+    Récupère les vrais carnets des deux exchanges et calcule le prix moyen
+    pondéré réellement obtenu — MÊME en cas de remplissage partiel (carnet
+    trop fin pour montant_usdt en entier). Le prix retourné n'est JAMAIS
+    fictif : prix_execution_moyen() ne calcule que sur les niveaux
+    réellement consommés, jamais extrapolé au-delà de la profondeur dispo.
 
-    Retourne un dict avec les détails, ou None si la liquidité est insuffisante.
+    "liquidite_suffisante" = True seulement si le montant COMPLET demandé
+    a pu être rempli des deux côtés. "montant_executable" donne le montant
+    réellement tradable (le plus petit des deux côtés) même quand c'est
+    inférieur à montant_usdt — c'est à l'appelant de décider s'il accepte
+    un trade de taille réduite plutôt que de rejeter entièrement.
     """
+    vide = {
+        "liquidite_suffisante": False, "montant_executable": 0.0, "montant_demande": montant_usdt,
+        "prix_achat_reel": 0.0, "prix_vente_reel": 0.0, "spread_reel_pct": 0.0,
+    }
+
     (bids_achat, asks_achat), (bids_vente, asks_vente) = await asyncio.gather(
         obtenir_carnet(exchange_achat, symbol),
         obtenir_carnet(exchange_vente, symbol),
     )
 
     if not asks_achat or not bids_vente:
-        return None
+        return vide
 
     prix_achat_reel, montant_rempli_achat, liquide_achat = prix_execution_moyen(asks_achat, montant_usdt)
     prix_vente_reel, montant_rempli_vente, liquide_vente = prix_execution_moyen(bids_vente, montant_usdt)
 
-    if not liquide_achat or not liquide_vente or prix_achat_reel <= 0:
-        return {
-            "liquidite_suffisante": False,
-            "montant_demande": montant_usdt,
-            "montant_disponible_achat": montant_rempli_achat,
-            "montant_disponible_vente": montant_rempli_vente,
-        }
+    if prix_achat_reel <= 0 or prix_vente_reel <= 0:
+        return vide
 
+    # Le montant exécutable des DEUX côtés à la fois = le plus petit des deux
+    # (inutile d'acheter pour 40$ si on ne peut en revendre que 15$ en face)
+    montant_executable = min(montant_rempli_achat, montant_rempli_vente)
     spread_reel_pct = ((prix_vente_reel - prix_achat_reel) / prix_achat_reel) * 100
 
     return {
-        "liquidite_suffisante": True,
+        "liquidite_suffisante": bool(liquide_achat and liquide_vente),
+        "montant_executable": round(montant_executable, 4),
+        "montant_demande": montant_usdt,
         "prix_achat_reel": prix_achat_reel,
         "prix_vente_reel": prix_vente_reel,
         "spread_reel_pct": spread_reel_pct,
-        "montant_usdt": montant_usdt,
     }
 
 

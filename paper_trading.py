@@ -47,6 +47,13 @@ COLONNES = [
 
 MONTANT_PAR_TRADE_USDT = 50.0
 
+# En dessous de ce montant réellement exécutable (carnet trop fin même pour
+# une fraction du trade visé), on rejette encore — sinon un carnet quasi
+# vide génèrerait des trades absurdes à 0.02$. Ajouté le 31/07 : le bot
+# trade maintenant avec une liquidité faible en adaptant le montant réel,
+# plutôt que d'exiger 100% du montant visé comme avant.
+MONTANT_MIN_EXECUTABLE_USDT = 5.0
+
 # --- 1. Élimination par crypto après échecs consécutifs (déjà existant) ---
 MAX_ECHECS_CONSECUTIFS = 5
 _echecs_consecutifs = {}
@@ -406,6 +413,9 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     resultat = await orderbook_depth.estimer_execution_reelle(ex_achat, ex_vente, symbol, montant_usdt)
     duree_verif_ms = (time.time() - _debut_verif) * 1000
 
+    montant_executable = resultat.get("montant_executable", 0.0) if resultat else 0.0
+    prix_ok = bool(resultat and resultat.get("prix_achat_reel", 0) > 0 and resultat.get("prix_vente_reel", 0) > 0)
+
     ligne = {
         "timestamp": time.time(), "symbole": symbol,
         "exchange_achat": ex_achat, "exchange_vente": ex_vente,
@@ -415,34 +425,44 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         "profit_usdt": "", "frais_usdt": "",
     }
 
-    liquide = bool(resultat and resultat.get("liquidite_suffisante"))
-
-    if not liquide:
+    # Rejet uniquement si VRAIMENT rien d'exploitable (carnet quasi vide) —
+    # sinon on trade avec le montant réellement disponible, à prix honnête
+    if not prix_ok or montant_executable < MONTANT_MIN_EXECUTABLE_USDT:
         _etat_papier["nb_trades_rejetes_liquidite"] += 1
         _ecrire_ligne(ligne)
-        log.info(f"🚫 Trade papier REJETÉ (liquidité insuffisante) : {symbol} {ex_achat}->{ex_vente} | vérif={duree_verif_ms:.0f}ms")
+        log.info(f"🚫 Trade papier REJETÉ (liquidité quasi nulle, {montant_executable:.2f}$ dispo < {MONTANT_MIN_EXECUTABLE_USDT}$ min) : {symbol} {ex_achat}->{ex_vente} | vérif={duree_verif_ms:.0f}ms")
         _enregistrer_resultat_et_verifier_elimination(symbol, succes=False)
         _verifier_circuit_breaker_global(succes=False)
         _enregistrer_score_crypto(symbol, succes=False)
-        return {"execute": False, "raison": "liquidité insuffisante"}
+        return {"execute": False, "raison": "liquidité quasi nulle"}
+
+    # Montant réellement tradé = le plus petit entre ce qu'on visait et ce
+    # que le carnet peut vraiment absorber — jamais plus que ce qui est
+    # réellement disponible, jamais un prix fictif
+    montant_reel = min(montant_usdt, montant_executable)
+    liquidite_partielle = montant_reel < montant_usdt - 0.01
 
     spread_reel_pct = resultat["spread_reel_pct"]
-    frais_usdt = montant_usdt * (frais_pct_total / 100)
-    profit_net_usdt = montant_usdt * (spread_reel_pct / 100) - frais_usdt
+    frais_usdt = montant_reel * (frais_pct_total / 100)
+    profit_net_usdt = montant_reel * (spread_reel_pct / 100) - frais_usdt
 
     # Sans double vérification, "OK" = juste le fait que ce soit rentable après frais
     double_verif_ok = spread_reel_pct > frais_pct_total
 
     ligne.update({
+        "montant_usdt": round(montant_reel, 4),  # le montant RÉELLEMENT tradé, pas celui visé au départ
         "prix_achat_reel": resultat["prix_achat_reel"],
         "prix_vente_reel": resultat["prix_vente_reel"],
         "spread_reel_pct": spread_reel_pct,
-        "liquidite_suffisante": True,
+        "liquidite_suffisante": not liquidite_partielle,
         "double_verification_ok": double_verif_ok,
         "profit_usdt": round(profit_net_usdt, 4),
         "frais_usdt": round(frais_usdt, 4),
     })
     _ecrire_ligne(ligne)
+
+    if liquidite_partielle:
+        log.info(f"⚠️ Trade papier PARTIEL : {symbol} {ex_achat}->{ex_vente} | {montant_reel:.2f}$ sur {montant_usdt:.2f}$ visés (carnet limité)")
 
     # Un trade n'est compté "réussi" que si la double vérif ET le profit sont positifs
     succes = double_verif_ok and profit_net_usdt > 0
@@ -460,7 +480,7 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
 
     # Met à jour les soldes fictifs par exchange et vérifie si un
     # rééquilibrage simulé est nécessaire (toujours en simulation)
-    _appliquer_mouvement_trade(ex_achat, ex_vente, montant_usdt, profit_net_usdt)
+    _appliquer_mouvement_trade(ex_achat, ex_vente, montant_reel, profit_net_usdt)
     _verifier_besoin_reequilibrage()
 
     log.info(
@@ -476,12 +496,14 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
         prix_achat = resultat["prix_achat_reel"]
         prix_vente = resultat["prix_vente_reel"]
-        quantite = montant_usdt / prix_achat if prix_achat else 0
+        quantite = montant_reel / prix_achat if prix_achat else 0
         montant_vente_brut = quantite * prix_vente
+        note_partiel = f" ⚠️ partiel ({montant_reel:.2f}$ sur {montant_usdt:.2f}$ visés, carnet limité)\n" if liquidite_partielle else ""
         asyncio.create_task(telegram_notifier.envoyer_message_simple(
-            f"🧪 <b>Trade papier {emoji}</b>\n\n"
+            f"🧪 <b>Trade papier {emoji}</b>\n"
+            f"{note_partiel}\n"
             f"{symbol} : {ex_achat} → {ex_vente}\n"
-            f"Acheté : {montant_usdt:.2f}$ → {quantite:.6g} {base_asset} @ {prix_achat:.6g}$\n"
+            f"Acheté : {montant_reel:.2f}$ → {quantite:.6g} {base_asset} @ {prix_achat:.6g}$\n"
             f"Vendu : {quantite:.6g} {base_asset} → {montant_vente_brut:.2f}$ @ {prix_vente:.6g}$\n"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
             f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
