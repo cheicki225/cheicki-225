@@ -356,6 +356,14 @@
             <div class="sub-stat" id="equityInfo" style="margin-top:10px;">—</div>
           </div>
 
+          <div class="panel glass" id="classementProfitPanel">
+            <div class="panel-title">Classement par profit cumulé</div>
+            <div class="mono-small" style="margin-bottom:4px;">🏆 Meilleures</div>
+            <div id="classementMeilleures"><div class="empty">—</div></div>
+            <div class="mono-small" style="margin:14px 0 4px;">⚠️ Pires</div>
+            <div id="classementPires"><div class="empty">—</div></div>
+          </div>
+
           <details class="panel glass">
             <summary><span class="panel-title" style="margin:0;">Performance détaillée</span><span class="chev">▶</span></summary>
             <div class="panel-body" id="perfDetail"><div class="empty">—</div></div>
@@ -517,7 +525,7 @@ function afficherVue(nom) {
   document.querySelectorAll('.nav-item').forEach(btn => btn.classList.toggle('active', btn.dataset.view === nom));
   if (!vuesChargees.has(nom)) {
     vuesChargees.add(nom);
-    if (nom === 'analytics') chargerEquityCurve();
+    if (nom === 'analytics') { chargerEquityCurve(); chargerClassementProfit(); }
     if (nom === 'trades') chargerTrades();
   }
 }
@@ -575,6 +583,23 @@ async function chargerEquityCurve() {
   } else {
     infoEl.textContent = 'Pas encore assez de trades pour un historique.';
   }
+}
+
+async function chargerClassementProfit() {
+  const c = await api('/api/classement_profit');
+  const rendreLigne = (x) =>
+    '<div class="row-item">' +
+      '<div><div class="row-sym">' + x.symbole + '</div><div class="row-path">' + x.nb_trades + ' trades · ' + x.nb_gains + 'G/' + x.nb_pertes + 'P</div></div>' +
+      '<div class="row-pct" style="color:' + (x.profit_total >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (x.profit_total >= 0 ? '+' : '') + x.profit_total.toFixed(3) + '$</div>' +
+    '</div>';
+
+  document.getElementById('classementMeilleures').innerHTML = c.meilleures.length
+    ? c.meilleures.map(rendreLigne).join('')
+    : '<div class="empty">Pas encore de gains enregistrés</div>';
+
+  document.getElementById('classementPires').innerHTML = c.pires.length
+    ? c.pires.map(rendreLigne).join('')
+    : '<div class="empty">Pas encore de pertes enregistrées</div>';
 }
 
 async function chargerTrades() {
