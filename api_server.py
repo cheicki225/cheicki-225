@@ -160,6 +160,15 @@ async def handler_classement_profit(request):
     return _reponse_json({"meilleures": meilleures, "pires": pires})
 
 
+async def handler_taille_trades(request):
+    """Diagnostic : trades à taille pleine vs partiels, avec taux de réussite séparés."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import paper_trading
+    return _reponse_json(paper_trading.stats_taille_trades())
+
+
 async def handler_cryptos(request):
     """
     Toutes les cryptos ACTUELLEMENT suivies par le bot (peu importe si elles
@@ -561,6 +570,7 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/equity_curve", handler_equity_curve)
     app.router.add_get("/api/trades", handler_trades)
     app.router.add_get("/api/classement_profit", handler_classement_profit)
+    app.router.add_get("/api/taille_trades", handler_taille_trades)
     app.router.add_get("/api/cryptos", handler_cryptos)
     app.router.add_get("/ws/spreads", handler_ws_spreads)
 

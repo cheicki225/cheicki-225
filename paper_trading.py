@@ -727,6 +727,54 @@ def courbe_equity(limite_points=300):
     return echantillon
 
 
+def stats_taille_trades() -> dict:
+    """
+    Sépare les trades exécutés en "taille pleine" (≥95% du montant visé) et
+    "partiels" (carnet trop limité pour absorber tout le montant), avec le
+    taux de réussite de chaque groupe séparément.
+
+    Existe pour repérer un piège statistique : depuis qu'on trade même avec
+    une liquidité faible, un bon taux de réussite global peut être tiré
+    presque entièrement par des micro-trades faciles à valider (ne mangent
+    que le tout premier niveau du carnet, celui qui a généré l'alerte),
+    sans dire grand-chose de la performance à pleine taille (50$), qui elle
+    doit creuser plus profond dans un carnet potentiellement dégradé.
+    """
+    valides = _lire_trades_valides()
+    if not valides:
+        return {
+            "nb_trades": 0, "montant_moyen": None,
+            "nb_pleins": 0, "nb_partiels": 0,
+            "taux_reussite_pleins": None, "taux_reussite_partiels": None,
+        }
+
+    seuil_plein = MONTANT_PAR_TRADE_USDT * 0.95  # tolérance 5% (arrondis de calcul)
+    montants, pleins, partiels = [], [], []
+
+    for l in valides:
+        try:
+            m = float(l["montant_usdt"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        montants.append(m)
+        (pleins if m >= seuil_plein else partiels).append(l)
+
+    def _taux(liste):
+        if not liste:
+            return None
+        reussis = sum(1 for l in liste if l["profit_usdt"] > 0)
+        return round(reussis / len(liste) * 100, 1)
+
+    return {
+        "nb_trades": len(montants),
+        "montant_moyen": round(sum(montants) / len(montants), 2) if montants else None,
+        "nb_pleins": len(pleins),
+        "nb_partiels": len(partiels),
+        "taux_reussite_pleins": _taux(pleins),
+        "taux_reussite_partiels": _taux(partiels),
+    }
+
+
 def _agreger_profit_par_crypto() -> dict:
     """
     Agrège trades_papier.csv par symbole. Retourne
