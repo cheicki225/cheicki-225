@@ -200,17 +200,18 @@ async def handler_cryptos(request):
     compteur_exchanges = {}
     for exchange, symbols in telegram_menu_bot.prix_live_ref.items():
         for symbole in symbols:
-            compteur_exchanges[symbole] = compteur_exchanges.get(symbole, 0) + 1
+            compteur_exchanges.setdefault(symbole, []).append(exchange)
 
     stats = paper_trading.stats_toutes_cryptos()
 
     resultat = []
-    for symbole, nb_exchanges in compteur_exchanges.items():
+    for symbole, liste_exchanges in compteur_exchanges.items():
         s = stats.get(symbole, {})
         p24 = prix_24h.obtenir(symbole)
         resultat.append({
             "symbole": symbole,
-            "nb_exchanges": nb_exchanges,
+            "nb_exchanges": len(liste_exchanges),
+            "exchanges": sorted(liste_exchanges),  # pour les liens directs vers chaque exchange
             "taux_reussite": s.get("taux_reussite"),
             "profit_total": s.get("profit_total"),
             "nb_trades": s.get("nb_trades", 0),
