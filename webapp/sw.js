@@ -1,6 +1,9 @@
-// Service worker minimal — juste nécessaire pour que le navigateur
-// considère l'app comme "installable" (critère PWA). Pas de cache
-// offline complexe : les données doivent toujours être fraîches.
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', () => self.clients.claim());
-self.addEventListener('fetch', () => {}); // laisse passer toutes les requêtes normalement
+const CACHE = 'arb-radar-v1';
+self.addEventListener('install', (e) => { self.skipWaiting(); });
+self.addEventListener('activate', (e) => { self.clients.claim(); });
+self.addEventListener('fetch', (e) => {
+  if (e.request.method !== 'GET' || e.request.url.includes('/api/') || e.request.url.includes('/ws/')) return;
+  e.respondWith(
+    fetch(e.request).catch(() => caches.match(e.request))
+  );
+});

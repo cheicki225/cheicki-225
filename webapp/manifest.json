@@ -1,18 +1,9 @@
 {
   "name": "Arbitrage Radar",
   "short_name": "ArbRadar",
-  "description": "Suivi en temps réel du bot d'arbitrage crypto",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0B0B0F",
-  "theme_color": "#0B0B0F",
-  "orientation": "portrait",
-  "icons": [
-    {
-      "src": "/static/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    }
-  ]
+  "background_color": "#101319",
+  "theme_color": "#101319",
+  "icons": [{ "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
 }
