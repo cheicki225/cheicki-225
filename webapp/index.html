@@ -148,6 +148,9 @@ input[type=password],input[type=text],input[type=number]{
   color:var(--text);text-decoration:none;font-size:12.5px;}
 a.exch-link:hover{background:var(--bg-elev);}
 .exch-logo{width:16px;height:16px;border-radius:4px;flex-shrink:0;object-fit:contain;}
+/* Exchange affiché en ligne dans un texte (opportunités, paire de spread) */
+.exch-inline{display:inline-flex;align-items:center;gap:3px;vertical-align:middle;}
+.exch-inline .exch-logo{width:12px;height:12px;border-radius:2px;}
 .exch-nom{flex:1;text-transform:capitalize;}
 .exch-fleche{color:var(--text-dimmer);font-size:11px;}
 a.exch-link:hover .exch-fleche{color:var(--green);}
@@ -737,11 +740,17 @@ function refreshDashboard(){
   apiFetch('/api/opportunites').then(function(list){
     list = list || [];
     var box = qs('oppsList');
+    if(popupOuvert) return;  // ne pas détruire une fenêtre ouverte
     if(!list.length){ box.innerHTML = '<div class="empty-note">Aucune opportunité récente</div>'; return; }
     box.innerHTML = list.slice(0,20).map(function(o){
+      /* Logo + nom pour chaque exchange du trajet (achat → vente) */
+      var trajet = (o.exchanges||[]).map(function(e){
+        return '<span class="exch-inline">' + logoExchange(e) + esc(e) + '</span>';
+      }).join('<span class="exch-fleche">→</span>');
       return '<div class="list-row">' + iconImg(o.symbole) +
-        '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) + '</div>' +
-        '<div class="row-sub">' + (o.exchanges||[]).join(' → ') + ' · ' + timeAgo(o.timestamp) + '</div></div>' +
+        '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) +
+        blocExchanges(o.symbole, o.exchanges_dispo) + '</div>' +
+        '<div class="row-sub">' + trajet + ' · ' + timeAgo(o.timestamp) + '</div></div>' +
         '<div class="row-value">' + fmtPct(o.spread_net_pct, 2) + '</div></div>';
     }).join('');
   }).catch(function(){});
@@ -749,10 +758,19 @@ function refreshDashboard(){
   apiFetch('/api/top_performers').then(function(list){
     list = list || [];
     var box = qs('topList');
+    if(popupOuvert) return;  // ne pas détruire une fenêtre ouverte
     if(!list.length){ box.innerHTML = '<div class="empty-note">Pas encore de classement</div>'; return; }
     box.innerHTML = list.slice(0,15).map(function(o, i){
+      /* reussis / total viennent des stats de session ; les pertes s'en déduisent */
+      var total = toNum(o.total), reussis = toNum(o.reussis);
+      var detail = '';
+      if(total !== null && reussis !== null){
+        detail = '<div class="row-sub"><span class="pos">' + reussis + 'G</span> / ' +
+                 '<span class="neg">' + (total - reussis) + 'P</span> · ' + total + ' trades</div>';
+      }
       return '<div class="list-row"><span class="row-sub" style="width:18px;">#'+(i+1)+'</span>' + iconImg(o.symbole) +
-        '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) + '</div></div>' +
+        '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) +
+        blocExchanges(o.symbole, o.exchanges) + '</div>' + detail + '</div>' +
         '<div class="row-value">' + fmtPct(o.taux) + '</div></div>';
     }).join('');
   }).catch(function(){});
@@ -811,12 +829,15 @@ function refreshAnalytics(){
 
 function renderRankRows(containerId, list, positive){
   var box = qs(containerId);
+  if(popupOuvert) return;  // ne pas détruire une fenêtre ouverte
   if(!list.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
   box.innerHTML = list.slice(0,10).map(function(o){
     var val = toNum(o.profit_total);
     return '<div class="list-row">' + iconImg(o.symbole) +
-      '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) + '</div>' +
-      '<div class="row-sub">' + fmtNum(o.nb_gains) + 'G / ' + fmtNum(o.nb_pertes) + 'P · ' + fmtNum(o.nb_trades) + ' trades</div></div>' +
+      '<div class="row-main"><div class="row-symbole">' + esc(o.symbole) +
+      blocExchanges(o.symbole, o.exchanges) + '</div>' +
+      '<div class="row-sub"><span class="pos">' + fmtNum(o.nb_gains) + 'G</span> / ' +
+      '<span class="neg">' + fmtNum(o.nb_pertes) + 'P</span> · ' + fmtNum(o.nb_trades) + ' trades</div></div>' +
       '<div class="row-value ' + (val===null?'':(val>=0?'pos':'neg')) + '">' + fmtMoney(o.profit_total) + '</div></div>';
   }).join('');
 }
@@ -938,6 +959,28 @@ function trierCryptos(liste){
   });
 }
 
+/* Bouton « ? » + fenêtre des exchanges où la crypto est disponible.
+   Réutilisé par toutes les listes (cryptos suivies, opportunités,
+   classements) — le compteur `uid` évite les collisions d'identifiant
+   quand un même symbole apparaît dans plusieurs listes à la fois. */
+var uidPopup = 0;
+function blocExchanges(symbole, exchanges){
+  if(!exchanges || !exchanges.length) return '';
+  uidPopup++;
+  return '<span class="exch-wrap" data-sym="' + esc(symbole) + '-' + uidPopup + '">' +
+    '<button class="exch-info" type="button" aria-label="Exchanges disponibles"' +
+    ' onclick="basculerExchanges(this)"' +
+    ' onmouseenter="survolExchanges(this, true)"' +
+    ' onmouseleave="survolExchanges(this, false)">?</button>' +
+    '<div class="exch-popup hidden"' +
+    ' onmouseenter="maintenirPopup(this, true)"' +
+    ' onmouseleave="maintenirPopup(this, false)">' +
+      '<div class="exch-popup-titre">Disponible sur</div>' +
+      exchanges.map(function(e){ return lienExchange(e, symbole); }).join('') +
+    '</div>' +
+  '</span>';
+}
+
 /* Symbole dont la fenêtre d'exchanges est ouverte. Tant qu'une fenêtre est
    ouverte, on suspend le réordonnancement de la liste : sinon chaque nouveau
    spread reçu détruirait la fenêtre pendant que l'utilisateur vise un lien. */
@@ -984,24 +1027,11 @@ function cryptoRowHtml(c){
   var classeSpread = spread === null ? '' : (spread >= 0 ? 'pos' : 'neg');
   var txtSpread = spread === null ? '—' : fmtPct(spread, 3);
   var paire = (c.exchanges_spread && c.exchanges_spread.length)
-    ? ' · <span class="row-sub">' + esc(c.exchanges_spread.join('/')) + '</span>' : '';
+    ? ' · <span class="row-sub">' + c.exchanges_spread.map(function(e){
+        return '<span class="exch-inline">' + logoExchange(e) + esc(e) + '</span>';
+      }).join('<span class="exch-fleche">→</span>') + '</span>' : '';
 
-  var exchanges = c.exchanges || [];
-  var bloc = '';
-  if(exchanges.length){
-    bloc = '<span class="exch-wrap" data-sym="' + esc(c.symbole) + '">' +
-      '<button class="exch-info" type="button" aria-label="Exchanges disponibles"' +
-      ' onclick="basculerExchanges(this)"' +
-      ' onmouseenter="survolExchanges(this, true)"' +
-      ' onmouseleave="survolExchanges(this, false)">?</button>' +
-      '<div class="exch-popup hidden"' +
-      ' onmouseenter="maintenirPopup(this, true)"' +
-      ' onmouseleave="maintenirPopup(this, false)">' +
-        '<div class="exch-popup-titre">Disponible sur</div>' +
-        exchanges.map(function(e){ return lienExchange(e, c.symbole); }).join('') +
-      '</div>' +
-    '</span>';
-  }
+  var bloc = blocExchanges(c.symbole, c.exchanges);
 
   var detailTrades = fmtNum(c.nb_trades) + ' trades';
   if(c.nb_trades > 0){
