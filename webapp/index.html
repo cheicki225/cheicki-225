@@ -497,15 +497,44 @@ function loadManifest(){
    Chargée une fois après connexion. Tant qu'elle est vide, on retombe
    simplement sur cryptocurrency-icons : aucune icône cassée entre-temps. */
 var logosCoinGecko = {};
+/* Le bot met plusieurs minutes à constituer son cache de logos (pages
+   CoinGecko espacées pour respecter la limite de débit). Une seule
+   récupération au démarrage tomberait donc souvent sur une table vide ou
+   partielle — et les icônes resteraient génériques jusqu'au rechargement
+   de la page. On re-récupère donc tant que le nombre de logos augmente. */
+var minuterieLogos = null;
+var tentativesLogos = 0;
+var MAX_TENTATIVES_LOGOS = 12;  // ~9 min de marge, largement le temps de constituer le cache
+
 function chargerLogos(){
   apiFetch('/api/logos')
     .then(function(map){
+      var avant = Object.keys(logosCoinGecko).length;
       logosCoinGecko = map || {};
-      /* Re-rend la liste déjà affichée pour remplacer les icônes génériques
-         par les vraies, sans refaire d'appel réseau vers /api/cryptos. */
-      if(loadedOnce.analytics) rendreListeCryptos();
+      var apres = Object.keys(logosCoinGecko).length;
+
+      if(apres !== avant) rafraichirIcones();
+
+      /* Tant que le cache continue de se remplir, on revérifie. On s'arrête
+         dès qu'il n'a plus bougé, ou après un nombre limité de tentatives
+         pour ne pas interroger indéfiniment un endpoint indisponible. */
+      clearTimeout(minuterieLogos);
+      tentativesLogos++;
+      if(tentativesLogos < MAX_TENTATIVES_LOGOS && (apres === 0 || apres !== avant)){
+        minuterieLogos = setTimeout(chargerLogos, 45000);
+      }
     })
     .catch(function(){});
+}
+
+/* Re-rend toutes les listes actuellement affichées, pour que les icônes
+   génériques soient remplacées partout — pas seulement dans « Cryptos suivies ». */
+function rafraichirIcones(){
+  if(popupOuvert) return;  // ne pas détruire une fenêtre ouverte
+  rendreListeCryptos();
+  refreshDashboard();
+  if(loadedOnce.analytics) refreshAnalytics();
+  if(loadedOnce.trades) refreshTrades();
 }
 
 function iconImg(symbole, size){
