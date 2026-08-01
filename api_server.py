@@ -82,6 +82,7 @@ async def handler_opportunites(request):
 
     import telegram_menu_bot
     dernieres = telegram_menu_bot.etat_bot.opportunites_trouvees[-30:]
+    dispo = _exchanges_par_symbole()
     resultat = []
     for item in reversed(dernieres):
         opp = item["opp"]
@@ -89,7 +90,11 @@ async def handler_opportunites(request):
             "timestamp": item["timestamp"],
             "type": opp.type_arbitrage,
             "symbole": opp.symboles[0],
+            # "exchanges" = le TRAJET du trade (achat -> vente)
             "exchanges": opp.exchanges,
+            # "exchanges_dispo" = TOUS les exchanges où la crypto est suivie
+            # (deux notions différentes, à ne pas confondre à l'affichage)
+            "exchanges_dispo": dispo.get(opp.symboles[0], []),
             "spread_net_pct": round(opp.spread_net_pct, 3),
         })
     return _reponse_json(resultat)
@@ -136,16 +141,37 @@ async def handler_trades(request):
     return _reponse_json(paper_trading.historique_trades(limite=100))
 
 
+def _exchanges_par_symbole() -> dict:
+    """
+    {symbole: [exchanges où il est suivi]} — construit depuis les prix live.
+    Partagé par plusieurs endpoints pour que chaque liste du dashboard puisse
+    afficher le bouton « ? » de disponibilité, pas seulement /api/cryptos.
+    """
+    import telegram_menu_bot
+    resultat = {}
+    for exchange, symbols in telegram_menu_bot.prix_live_ref.items():
+        for symbole in symbols:
+            resultat.setdefault(symbole, []).append(exchange)
+    for symbole in resultat:
+        resultat[symbole].sort()
+    return resultat
+
+
 async def handler_top_performers(request):
     if not _verifier_auth(request):
         return _reponse_json({"erreur": "non autorisé"}, 401)
 
     import paper_trading
+    dispo = _exchanges_par_symbole()
     classement = []
     for symbole, stats in paper_trading._stats_par_crypto.items():
         if stats["total"] >= 2:
             taux = stats["reussis"] / stats["total"] * 100
-            classement.append({"symbole": symbole, "taux": round(taux, 1), **stats})
+            classement.append({
+                "symbole": symbole, "taux": round(taux, 1),
+                "exchanges": dispo.get(symbole, []),
+                **stats,
+            })
     classement.sort(key=lambda x: x["taux"], reverse=True)
     return _reponse_json(classement[:20])
 
@@ -157,6 +183,10 @@ async def handler_classement_profit(request):
 
     import paper_trading
     meilleures, pires = paper_trading.classement_profit_par_crypto(limite=10)
+    dispo = _exchanges_par_symbole()
+    for groupe in (meilleures, pires):
+        for c in groupe:
+            c["exchanges"] = dispo.get(c["symbole"], [])
     return _reponse_json({"meilleures": meilleures, "pires": pires})
 
 
