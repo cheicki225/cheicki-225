@@ -54,6 +54,98 @@ def _session_avec_dns_force() -> aiohttp.ClientSession:
 # Anti-spam : ne renvoie pas la même opportunité avant ce délai (secondes)
 COOLDOWN_PAR_OPPORTUNITE_SEC = 60
 
+# ============================================================
+# LIMITEUR DE DÉBIT TELEGRAM
+# ============================================================
+# Telegram limite les envois vers un même chat à environ 20 messages par
+# minute. Au-delà, il répond 429 avec un "retry_after" qui peut atteindre
+# plusieurs HEURES de blocage total — et continuer à envoyer pendant ce
+# temps ne fait qu'entretenir le problème.
+#
+# Tous les envois passent donc par _envoyer_payload(), qui :
+#   1. espace les messages d'au moins _INTERVALLE_MIN_ENVOI_SEC
+#   2. respecte scrupuleusement le retry_after renvoyé par Telegram
+#   3. ABANDONNE les messages pendant un blocage plutôt que de les empiler
+#      (une alerte d'arbitrage vieille de 2h n'a aucun intérêt, et les
+#      accumuler relancerait le flood dès la fin du blocage)
+_INTERVALLE_MIN_ENVOI_SEC = 3.0  # 3s -> ~20 messages/minute maximum
+
+_verrou_envoi = asyncio.Lock()
+_dernier_envoi = 0.0
+_bloque_jusqua = 0.0
+_nb_abandonnes = 0
+_dernier_log_blocage = 0.0
+
+
+def etat_limiteur() -> dict:
+    """Diagnostic : blocage en cours et nombre de messages abandonnés."""
+    restant = max(0.0, _bloque_jusqua - time.time())
+    return {
+        "bloque": restant > 0,
+        "secondes_restantes": round(restant),
+        "messages_abandonnes": _nb_abandonnes,
+    }
+
+
+async def _envoyer_payload(payload: dict) -> bool:
+    """Point de passage UNIQUE pour tout envoi Telegram. Retourne True si envoyé."""
+    global _dernier_envoi, _bloque_jusqua, _nb_abandonnes, _dernier_log_blocage
+
+    maintenant = time.time()
+    if maintenant < _bloque_jusqua:
+        _nb_abandonnes += 1
+        # Un seul log par minute pendant le blocage, sinon on remplit les
+        # journaux avec des milliers de lignes identiques (ce qui s'est passé)
+        if maintenant - _dernier_log_blocage > 60:
+            _dernier_log_blocage = maintenant
+            restant = int(_bloque_jusqua - maintenant)
+            log.warning(
+                f"⏳ Telegram bloqué encore {restant}s ({restant // 60} min) — "
+                f"{_nb_abandonnes} message(s) abandonné(s) depuis le début du blocage"
+            )
+        return False
+
+    async with _verrou_envoi:
+        # Espacement minimum entre deux envois
+        attente = _INTERVALLE_MIN_ENVOI_SEC - (time.time() - _dernier_envoi)
+        if attente > 0:
+            await asyncio.sleep(attente)
+
+        try:
+            async with _session_avec_dns_force() as session:
+                async with session.post(
+                    TELEGRAM_API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    _dernier_envoi = time.time()
+
+                    if resp.status == 200:
+                        return True
+
+                    if resp.status == 429:
+                        try:
+                            donnees = await resp.json()
+                            retry = float(donnees.get("parameters", {}).get("retry_after", 60))
+                        except Exception:
+                            retry = 60.0
+                        _bloque_jusqua = time.time() + retry
+                        _nb_abandonnes = 0
+                        _dernier_log_blocage = time.time()
+                        log.error(
+                            f"🚫 Telegram : limite de débit atteinte — envois suspendus "
+                            f"{int(retry)}s ({int(retry) // 60} min). Les messages de cette "
+                            f"période seront abandonnés, pas mis en file."
+                        )
+                        return False
+
+                    body = await resp.text()
+                    log.error(f"Échec envoi Telegram ({resp.status}) : {body[:200]}")
+                    return False
+        except Exception as e:
+            _dernier_envoi = time.time()
+            log.error(f"Erreur envoi Telegram : {e}")
+            return False
+
+
 # Garde en mémoire la dernière fois qu'une opportunité a été notifiée
 _dernieres_notifications: dict[str, float] = {}
 
@@ -112,20 +204,11 @@ async def envoyer_alerte(opp, forcer: bool = False) -> bool:
         "parse_mode": "HTML",
     }
 
-    try:
-        async with _session_avec_dns_force() as session:
-            async with session.post(TELEGRAM_API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    _dernieres_notifications[cle] = maintenant
-                    log.info(f"Alerte envoyée : {cle}")
-                    return True
-                else:
-                    body = await resp.text()
-                    log.error(f"Échec envoi Telegram ({resp.status}) : {body[:200]}")
-                    return False
-    except Exception as e:
-        log.error(f"Erreur envoi Telegram : {e}")
-        return False
+    envoye = await _envoyer_payload(payload)
+    if envoye:
+        _dernieres_notifications[cle] = maintenant
+        log.info(f"Alerte envoyée : {cle}")
+    return envoye
 
 
 async def envoyer_message_simple(texte: str) -> bool:
@@ -133,14 +216,9 @@ async def envoyer_message_simple(texte: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
 
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": texte, "parse_mode": "HTML"}
-    try:
-        async with _session_avec_dns_force() as session:
-            async with session.post(TELEGRAM_API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                return resp.status == 200
-    except Exception as e:
-        log.error(f"Erreur envoi Telegram : {e}")
-        return False
+    return await _envoyer_payload({
+        "chat_id": TELEGRAM_CHAT_ID, "text": texte, "parse_mode": "HTML",
+    })
 
 
 # ============================================================

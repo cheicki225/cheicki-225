@@ -428,6 +428,7 @@ from config import (
 import filtre_ml
 import spreads_live
 import prix_24h
+import logos_crypto
 import orderbook_depth
 
 
@@ -947,6 +948,7 @@ async def main():
     tasks.append(asyncio.create_task(health_manager.surveiller_sante(prix_live)))
     tasks.append(asyncio.create_task(api_server.demarrer_serveur_web()))
     tasks.append(asyncio.create_task(prix_24h.boucle_rafraichissement()))
+    tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
 
     await asyncio.gather(*tasks)
 

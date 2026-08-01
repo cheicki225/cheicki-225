@@ -160,6 +160,19 @@ async def handler_classement_profit(request):
     return _reponse_json({"meilleures": meilleures, "pires": pires})
 
 
+async def handler_logos(request):
+    """
+    Table {TICKER: url_du_logo} pour toutes les cryptos connues de CoinGecko.
+    Le frontend la récupère une fois au démarrage et l'utilise en priorité,
+    avec repli sur la bibliothèque cryptocurrency-icons puis sur une initiale.
+    """
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import logos_crypto
+    return _reponse_json(logos_crypto.tous())
+
+
 async def handler_taille_trades(request):
     """Diagnostic : trades à taille pleine vs partiels, avec taux de réussite séparés."""
     if not _verifier_auth(request):
@@ -571,6 +584,7 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/trades", handler_trades)
     app.router.add_get("/api/classement_profit", handler_classement_profit)
     app.router.add_get("/api/taille_trades", handler_taille_trades)
+    app.router.add_get("/api/logos", handler_logos)
     app.router.add_get("/api/cryptos", handler_cryptos)
     app.router.add_get("/ws/spreads", handler_ws_spreads)
 

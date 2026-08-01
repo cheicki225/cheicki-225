@@ -97,8 +97,13 @@ RESEAU_FALLBACK = "TRC20"
 # ============================================================
 # Maximum de cryptos DIFFÉRENTES alertées par minute glissante — évite
 # qu'une seule paire instable (ex: un altcoin peu liquide qui oscille)
-# ne monopolise le flux d'alertes Telegram
-MAX_ALERTES_PAR_MINUTE = 30
+# ne monopolise le flux d'alertes Telegram.
+# ⚠️ Chaque alerte génère AUSSI un message de trade papier : le nombre réel
+# de messages Telegram est donc le double de cette valeur. Telegram bloque
+# au-delà d'environ 20 messages/minute vers un même chat (blocage de
+# plusieurs heures constaté le 01/08 avec l'ancienne valeur de 30).
+# 8 alertes/minute = ~16 messages/minute, sous la limite avec de la marge.
+MAX_ALERTES_PAR_MINUTE = 8
 
 # Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
 # la combinaison d'exchanges — évite qu'une crypto volatile ne déclenche
