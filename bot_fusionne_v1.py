@@ -465,6 +465,7 @@ import filtre_ml
 import spreads_live
 import prix_24h
 import logos_crypto
+import frais_retrait
 import orderbook_depth
 
 
@@ -1035,6 +1036,7 @@ async def main():
     tasks.append(asyncio.create_task(api_server.demarrer_serveur_web()))
     tasks.append(asyncio.create_task(prix_24h.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
+    tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
 
     await asyncio.gather(*tasks)
 

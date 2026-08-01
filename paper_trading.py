@@ -441,11 +441,21 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     liquidite_partielle = montant_reel < montant_usdt - 0.01
 
     spread_reel_pct = resultat["spread_reel_pct"]
-    frais_usdt = montant_reel * (frais_pct_total / 100)
+    frais_trading_usdt = montant_reel * (frais_pct_total / 100)
+
+    # Frais de RETRAIT : boucler un arbitrage suppose de rapatrier les fonds
+    # vers la plateforme d'achat. C'est un coût FIXE en dollars — donc
+    # proportionnellement écrasant sur un petit trade (1$ sur 50$ = 2%, soit
+    # plus que l'écart lui-même dans la plupart des cas).
+    # Ignorer ce coût surestimait fortement le profit affiché.
+    import frais_retrait
+    frais_retrait_usdt = frais_retrait.frais_retrait_usdt(ex_vente)
+
+    frais_usdt = frais_trading_usdt + frais_retrait_usdt
     profit_net_usdt = montant_reel * (spread_reel_pct / 100) - frais_usdt
 
-    # Sans double vérification, "OK" = juste le fait que ce soit rentable après frais
-    double_verif_ok = spread_reel_pct > frais_pct_total
+    # Rentable seulement si l'écart couvre TOUS les frais, retrait compris
+    double_verif_ok = profit_net_usdt > 0
 
     ligne.update({
         "montant_usdt": round(montant_reel, 4),  # le montant RÉELLEMENT tradé, pas celui visé au départ
@@ -522,6 +532,13 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         else:
             ligne_annonce = ""
 
+        detail_frais = frais_retrait.detail(ex_vente)
+        marque = " (estimé)" if detail_frais["est_estime"] else ""
+        ligne_frais = (
+            f"Frais : transaction {frais_trading_usdt:.3f}$ + "
+            f"retrait {frais_retrait_usdt:.3f}${marque} = {frais_usdt:.3f}$\n"
+        )
+
         asyncio.create_task(telegram_notifier.envoyer_message_simple(
             f"🧪 <b>Trade papier {emoji}</b>\n\n"
             f"{symbol} : {ex_achat} → {ex_vente}\n"
@@ -530,8 +547,8 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
             f"{ligne_annonce}"
             f"{ligne_liquidite}"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
-            f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"
-            f"Profit net : {profit_net_usdt:+.3f}$ (frais {frais_usdt:.3f}$ inclus)\n"
+            f"{ligne_frais}"
+            f"Profit net : {profit_net_usdt:+.3f}$\n"
             f"⏱️ Temps de vérification : {duree_verif_ms:.0f}ms"
         ))
     except Exception as e:
