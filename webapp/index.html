@@ -475,9 +475,9 @@ function chargerLogos(){
   apiFetch('/api/logos')
     .then(function(map){
       logosCoinGecko = map || {};
-      /* Re-rend les listes déjà affichées pour remplacer les icônes
-         génériques par les vraies, sans attendre le prochain cycle. */
-      if(loadedOnce.analytics) loadCryptosList();
+      /* Re-rend la liste déjà affichée pour remplacer les icônes génériques
+         par les vraies, sans refaire d'appel réseau vers /api/cryptos. */
+      if(loadedOnce.analytics) rendreListeCryptos();
     })
     .catch(function(){});
 }
@@ -488,21 +488,26 @@ function iconImg(symbole, size){
   var generic = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/generic.svg';
   var lib = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/' + t + '.svg';
   var cg = logosCoinGecko[t.toUpperCase()];
-  /* Ordre de repli : CoinGecko -> bibliothèque locale -> générique -> initiale.
-     Chaque échec de chargement passe à l'étape suivante via data-step. */
-  var premier = cg || lib;
-  var suivant = cg ? lib : generic;
+  /* Chaîne de repli, dans l'ordre : CoinGecko (si connu) -> bibliothèque
+     locale -> icône générique -> initiale dans un cercle. On ne met dans la
+     chaîne que les URLs pas encore essayées, pour ne pas retenter en vain
+     celle qui vient d'échouer. */
+  var chaine = cg ? [lib, generic] : [generic];
   var letter = (t.charAt(0) || '?').toUpperCase();
-  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+premier+'" alt="'+esc(t)+'" ' +
-    'data-lib="'+lib+'" data-generic="'+generic+'" ' +
+  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+(cg || lib)+'" alt="'+esc(t)+'" ' +
+    'data-chaine="'+esc(chaine.join('|'))+'" ' +
     'onerror="cryptoIconFallback(this, \''+letter+'\', '+size+')">';
 }
 
-/* Repli progressif : appelé à chaque échec de chargement d'image. */
+/* Repli progressif : consomme la chaîne d'URLs restantes, puis affiche
+   l'initiale quand toutes ont échoué. */
 window.cryptoIconFallback = function(img, letter, size){
-  var step = img.dataset.step || '0';
-  if(step === '0'){ img.dataset.step = '1'; img.src = img.dataset.lib; return; }
-  if(step === '1'){ img.dataset.step = '2'; img.src = img.dataset.generic; return; }
+  var restantes = (img.dataset.chaine || '').split('|').filter(Boolean);
+  if(restantes.length){
+    img.src = restantes.shift();
+    img.dataset.chaine = restantes.join('|');
+    return;
+  }
   img.outerHTML = '<span class="icon-fallback" style="width:'+size+'px;height:'+size+'px">'+letter+'</span>';
 };
 
@@ -1063,11 +1068,18 @@ function openSpreadSocket(){
   ws.onmessage = function(evt){
     var msg; try { msg = JSON.parse(evt.data); } catch(e){ return; }
     if(msg.type === 'snapshot' && msg.data){
-      /* Fusion, PAS remplacement : on ne garde du WebSocket que le spread et
-         sa paire d'exchanges, sans toucher aux champs venant de /api/cryptos. */
-      Object.keys(msg.data).forEach(function(sym){
-        var d = msg.data[sym] || {};
-        cryptoData[sym] = Object.assign({}, cryptoData[sym] || { symbole: sym }, {
+      /* L'instantané arrive sous forme de LISTE d'objets, chacun portant déjà
+         son champ `symbole` (voir spreads_live.obtenir_etat_actuel).
+         Le lire comme un dictionnaire donnerait des indices numériques comme
+         symboles (« 30 », « 5 »...). On tolère les deux formats par sécurité. */
+      var entrees = Array.isArray(msg.data)
+        ? msg.data
+        : Object.keys(msg.data).map(function(sym){
+            return Object.assign({ symbole: sym }, msg.data[sym]);
+          });
+      entrees.forEach(function(d){
+        if(!d || !d.symbole) return;
+        cryptoData[d.symbole] = Object.assign({}, cryptoData[d.symbole] || { symbole: d.symbole }, {
           spread_net_pct: d.spread_net_pct,
           exchanges_spread: d.exchanges,
           au_dessus_seuil: d.au_dessus_seuil
@@ -1098,6 +1110,7 @@ function boot(){
   qs('gate').classList.add('hidden');
   qs('app').classList.remove('hidden');
   loadManifest();
+  chargerLogos();   // table des logos CoinGecko (18000+ cryptos)
   refreshEtat();
   refreshTickerAndBell();
   refreshDashboard();
