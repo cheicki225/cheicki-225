@@ -768,6 +768,7 @@ def stats_taille_trades() -> dict:
             "nb_trades": 0, "montant_moyen": None,
             "nb_pleins": 0, "nb_partiels": 0,
             "taux_reussite_pleins": None, "taux_reussite_partiels": None,
+            "nb_gagnants": 0, "nb_perdants": 0,
         }
 
     seuil_plein = MONTANT_PAR_TRADE_USDT * 0.95  # tolérance 5% (arrondis de calcul)
@@ -794,6 +795,9 @@ def stats_taille_trades() -> dict:
         "nb_partiels": len(partiels),
         "taux_reussite_pleins": _taux(pleins),
         "taux_reussite_partiels": _taux(partiels),
+        # Décompte global sur l'historique complet (pas seulement la session)
+        "nb_gagnants": sum(1 for l in valides if l["profit_usdt"] > 0),
+        "nb_perdants": sum(1 for l in valides if l["profit_usdt"] < 0),
     }
 
 
@@ -820,11 +824,13 @@ def _agreger_profit_par_crypto() -> dict:
 
 def stats_toutes_cryptos() -> dict:
     """
-    {symbole: {taux_reussite, profit_total, nb_trades}} pour TOUTE crypto
-    ayant déjà généré au moins un trade papier — taux_reussite vient de la
-    session en cours (_stats_par_crypto), profit_total de l'historique
-    complet persistant (trades_papier.csv). None si pas encore de donnée
-    exploitable pour cette métrique précise (jamais un chiffre inventé).
+    {symbole: {taux_reussite, profit_total, nb_trades, nb_gains, nb_pertes}}
+    pour TOUTE crypto ayant déjà généré au moins un trade papier.
+
+    taux_reussite vient de la session en cours (_stats_par_crypto) ; les
+    autres champs de l'historique complet persistant (trades_papier.csv).
+    None si pas encore de donnée exploitable pour cette métrique précise
+    (jamais un chiffre inventé).
     """
     profits = _agreger_profit_par_crypto()
     tous_symboles = set(profits.keys()) | set(_stats_par_crypto.keys())
@@ -832,11 +838,13 @@ def stats_toutes_cryptos() -> dict:
     resultat = {}
     for s in tous_symboles:
         session = _stats_par_crypto.get(s, {"total": 0, "reussis": 0})
-        p = profits.get(s, {"profit_total": 0.0, "nb_trades": 0})
+        p = profits.get(s, {"profit_total": 0.0, "nb_trades": 0, "nb_gains": 0, "nb_pertes": 0})
         resultat[s] = {
             "taux_reussite": round(session["reussis"] / session["total"] * 100, 1) if session["total"] > 0 else None,
             "profit_total": round(p["profit_total"], 3) if p["nb_trades"] > 0 else None,
             "nb_trades": p["nb_trades"],
+            "nb_gains": p.get("nb_gains", 0),
+            "nb_pertes": p.get("nb_pertes", 0),
         }
     return resultat
 

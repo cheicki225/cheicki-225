@@ -215,6 +215,8 @@ async def handler_cryptos(request):
             "taux_reussite": s.get("taux_reussite"),
             "profit_total": s.get("profit_total"),
             "nb_trades": s.get("nb_trades", 0),
+            "nb_gains": s.get("nb_gains", 0),
+            "nb_pertes": s.get("nb_pertes", 0),
             "prix": p24["prix"] if p24 else None,
             "variation_24h_pct": round(p24["variation_24h_pct"], 2) if p24 else None,
         })
