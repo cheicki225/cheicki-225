@@ -64,7 +64,13 @@ button{-webkit-tap-highlight-color:transparent;}
 .bell-wrap{position:relative;width:38px;height:38px;border-radius:10px;background:var(--bg-elev);display:grid;place-items:center;flex-shrink:0;}
 #bellBadge{position:absolute;top:-5px;right:-5px;background:var(--red);color:oklch(0.15 0.02 250);font-size:10px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:grid;place-items:center;padding:0 3px;font-family:var(--font-mono);}
 #exchangeRow{display:flex;gap:6px;overflow-x:auto;padding:0 16px 10px;}
-.exch-pill{flex-shrink:0;font-family:var(--font-mono);font-size:11px;color:var(--text-dim);background:var(--bg-elev);border:1px solid var(--border);border-radius:999px;padding:4px 10px;}
+.exch-pill{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim);background:var(--bg-elev);border:1px solid var(--border);border-radius:999px;padding:4px 10px;}
+.exch-pill .exch-logo{width:13px;height:13px;border-radius:3px;}
+.search-input{width:calc(100% - 32px);margin:0 16px 10px;padding:9px 12px;font-size:13px;
+  font-family:var(--font-mono);color:var(--text);background:var(--bg-elev);
+  border:1px solid var(--border);border-radius:9px;}
+.search-input::placeholder{color:var(--text-dimmer);}
+.search-input:focus{outline:none;border-color:var(--green);}
 
 /* ---------- nav ---------- */
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;background:var(--bg-elev);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);}
@@ -141,13 +147,14 @@ input[type=password],input[type=text],input[type=number]{
 .exch-link{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;
   color:var(--text);text-decoration:none;font-size:12.5px;}
 a.exch-link:hover{background:var(--bg-elev);}
-.exch-logo{width:16px;height:16px;border-radius:4px;flex-shrink:0;}
+.exch-logo{width:16px;height:16px;border-radius:4px;flex-shrink:0;object-fit:contain;}
 .exch-nom{flex:1;text-transform:capitalize;}
 .exch-fleche{color:var(--text-dimmer);font-size:11px;}
 a.exch-link:hover .exch-fleche{color:var(--green);}
 /* Sur écran étroit, la fenêtre est ancrée à gauche pour ne pas déborder */
 @media (max-width:520px){ .exch-popup{left:auto;right:-8px;} }
-.icon-badge{width:26px;height:26px;border-radius:50%;background:var(--bg-elev);flex-shrink:0;object-fit:cover;}
+.icon-badge{width:26px;height:26px;border-radius:50%;background:var(--bg-elev);flex-shrink:0;
+  object-fit:contain;padding:1px;}
 .icon-fallback{width:26px;height:26px;border-radius:50%;background:var(--blue-bg);color:var(--blue);display:grid;place-items:center;font-size:11px;font-weight:800;flex-shrink:0;}
 .row-main{flex:1;min-width:0;}
 .row-symbole{font-weight:700;font-size:13px;}
@@ -254,6 +261,9 @@ h2.view-title{font-size:18px;font-weight:800;margin:4px 0 0;}
       <div class="gauge" id="gaugeTaux" style="--pct:0;--gauge-color:var(--text-dimmer);"><span id="tauxReussite">—</span></div>
       <div class="grid2" style="flex:1;">
         <div class="stat"><span class="label">Trades exécutés</span><span class="value" id="tradesExec">—</span></div>
+        <div class="stat"><span class="label">Gagnants / Perdants</span>
+          <span class="value"><span class="pos" id="nbGagnantsVal">—</span> / <span class="neg" id="nbPerdantsVal">—</span></span>
+        </div>
         <div class="stat"><span class="label">Profit factor</span><span class="value" id="profitFactorVal">—</span></div>
         <div class="stat"><span class="label">R/R moyen</span><span class="value" id="avgRrVal">—</span></div>
         <div class="stat"><span class="label">Sécurité</span>
@@ -320,6 +330,8 @@ h2.view-title{font-size:18px;font-weight:800;margin:4px 0 0;}
 
     <details class="panel" id="cryptosDetails">
       <summary>Cryptos suivies (temps réel)<span class="live-dot" id="liveDotCryptos"></span></summary>
+      <input class="search-input" id="cryptosSearch" type="search" placeholder="Rechercher une crypto (ex : BTC)"
+             autocomplete="off" oninput="filtrerCryptos()">
       <div class="panel-body row-list" id="cryptosList"><div class="empty-note">—</div></div>
     </details>
 
@@ -505,7 +517,7 @@ function iconImg(symbole, size){
      celle qui vient d'échouer. */
   var chaine = cg ? [lib, generic] : [generic];
   var letter = (t.charAt(0) || '?').toUpperCase();
-  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+(cg || lib)+'" alt="'+esc(t)+'" ' +
+  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+(cg || lib)+'" alt="" ' +
     'data-chaine="'+esc(chaine.join('|'))+'" ' +
     'onerror="cryptoIconFallback(this, \''+letter+'\', '+size+')">';
 }
@@ -652,7 +664,8 @@ function refreshEtat(){
 
     var exRow = qs('exchangeRow');
     exRow.innerHTML = Object.keys(e.exchanges || {}).map(function(name){
-      return '<span class="exch-pill">' + esc(name) + ' · ' + esc(String(e.exchanges[name])) + '</span>';
+      return '<span class="exch-pill">' + logoExchange(name) +
+        esc(name) + ' · ' + esc(String(e.exchanges[name])) + '</span>';
     }).join('');
 
     qs('blacklistAutoBadge').textContent = e.blacklist_active ? 'Actif' : 'Désactivé';
@@ -715,6 +728,8 @@ function refreshDashboard(){
     qs('montantMoyenVal').textContent = dash(t.montant_moyen, function(n){ return n.toFixed(2)+'$'; });
     qs('nbPleinsVal').textContent = fmtNum(t.nb_pleins);
     qs('nbPartielsVal').textContent = fmtNum(t.nb_partiels);
+    qs('nbGagnantsVal').textContent = fmtNum(t.nb_gagnants);
+    qs('nbPerdantsVal').textContent = fmtNum(t.nb_perdants);
     qs('tauxPleinsVal').textContent = fmtPct(t.taux_reussite_pleins);
     qs('tauxPartielsVal').textContent = fmtPct(t.taux_reussite_partiels);
   }).catch(function(){});
@@ -928,12 +943,27 @@ function trierCryptos(liste){
    spread reçu détruirait la fenêtre pendant que l'utilisateur vise un lien. */
 var popupOuvert = null;
 
+window.filtrerCryptos = function(){ rendreListeCryptos(); };
+
 function rendreListeCryptos(){
   var box = qs('cryptosList');
   if(!box) return;
   if(popupOuvert) return;  // rendu suspendu, les données restent à jour en mémoire
-  var liste = trierCryptos(Object.keys(cryptoData).map(function(s){ return cryptoData[s]; }));
-  if(!liste.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
+
+  var champ = qs('cryptosSearch');
+  var recherche = champ ? champ.value.trim().toUpperCase() : '';
+
+  var liste = Object.keys(cryptoData).map(function(s){ return cryptoData[s]; });
+  if(recherche){
+    liste = liste.filter(function(c){ return c.symbole.toUpperCase().indexOf(recherche) !== -1; });
+  }
+  liste = trierCryptos(liste);
+
+  if(!liste.length){
+    box.innerHTML = '<div class="empty-note">' +
+      (recherche ? 'Aucune crypto ne correspond à « ' + esc(recherche) + ' »' : '—') + '</div>';
+    return;
+  }
   box.innerHTML = liste.map(cryptoRowHtml).join('');
 }
 
@@ -973,13 +1003,19 @@ function cryptoRowHtml(c){
     '</span>';
   }
 
+  var detailTrades = fmtNum(c.nb_trades) + ' trades';
+  if(c.nb_trades > 0){
+    detailTrades += ' <span class="pos">' + fmtNum(c.nb_gains) + '✓</span>' +
+                    '/<span class="neg">' + fmtNum(c.nb_pertes) + '✗</span>';
+  }
+
   return '<div class="list-row crypto-row' + (c.au_dessus_seuil ? ' hl' : '') + '" data-symbole="' + esc(c.symbole) + '">' +
     '<div class="crypto-head">' +
       iconImg(c.symbole) +
       '<div class="row-main">' +
         '<div class="row-symbole">' + esc(c.symbole) + '</div>' +
         '<div class="row-sub">' + fmtNum(c.nb_exchanges) + ' exch. ' + bloc +
-          ' · ' + fmtNum(c.nb_trades) + ' trades</div>' +
+          ' · ' + detailTrades + '</div>' +
       '</div>' +
       '<div class="row-value ' + classeSpread + '">' + txtSpread + paire + '</div>' +
     '</div>' +
