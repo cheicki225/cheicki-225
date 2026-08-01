@@ -64,9 +64,13 @@ def _parser_page(data) -> dict[str, str]:
     """
     Extrait {TICKER: url_logo} d'une page /coins/markets.
     Format attendu : [{"symbol": "btc", "name": "Bitcoin", "image": "https://..."}]
-    Les variantes 'large' de l'URL sont converties en 'small' (~2 Ko au lieu
-    de ~15 Ko) : on affiche ces icônes en 26px, la haute résolution est inutile
-    et alourdirait le chargement d'une liste de plusieurs centaines de lignes.
+
+    ⚠️ L'URL est reprise TELLE QUELLE. Une version antérieure remplaçait
+    « /large/ » par « /small/ » pour alléger le chargement — mais cette
+    variante n'existe pas pour toutes les cryptos, ce qui provoquait un 404
+    et un repli sur l'icône générique (bug constaté le 01/08 : DODO, BTR,
+    GODS et d'autres restaient sur l'icône par défaut). Les images sont
+    légères de toute façon, et le navigateur les met en cache.
     """
     resultat = {}
     if not isinstance(data, list):
@@ -81,11 +85,17 @@ def _parser_page(data) -> dict[str, str]:
             continue
         if not image.startswith("https://"):
             continue  # ignore toute URL inattendue plutôt que de l'injecter dans le HTML
-        resultat[symbole.upper()] = image.replace("/large/", "/small/")
+        resultat[symbole.upper()] = image
     return resultat
 
 
-async def _recuperer_page(session, page: int) -> dict[str, str]:
+async def _recuperer_page(session, page: int):
+    """
+    Retourne {TICKER: url} pour une page, ou None si l'appel a ÉCHOUÉ
+    (à distinguer d'un dict vide, qui signifie « plus de résultats »).
+    Réessaie automatiquement en cas de limite de débit (429), fréquente
+    depuis les IP partagées des hébergeurs comme Railway.
+    """
     params = {
         "vs_currency": "usd",
         "order": "market_cap_desc",
@@ -93,11 +103,26 @@ async def _recuperer_page(session, page: int) -> dict[str, str]:
         "page": str(page),
         "sparkline": "false",
     }
-    async with session.get(URL_MARKETS, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-        if resp.status != 200:
+
+    for tentative in range(3):
+        async with session.get(URL_MARKETS, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status == 200:
+                return _parser_page(await resp.json(content_type=None))
+
+            if resp.status == 429:
+                attente = float(resp.headers.get("Retry-After", 30))
+                log.warning(
+                    f"logos_crypto : limite de débit page {page}, "
+                    f"nouvelle tentative dans {attente:.0f}s ({tentative + 1}/3)"
+                )
+                await asyncio.sleep(min(attente, 90))
+                continue
+
             log.warning(f"logos_crypto : page {page} — statut HTTP {resp.status}")
-            return {}
-        return _parser_page(await resp.json(content_type=None))
+            return None
+
+    log.warning(f"logos_crypto : page {page} abandonnée après 3 tentatives")
+    return None
 
 
 async def _rafraichir_une_fois():
@@ -108,23 +133,37 @@ async def _rafraichir_une_fois():
 
     Les pages sont parcourues dans l'ordre (capitalisation décroissante) et
     on ne remplace pas un ticker déjà vu — la première occurrence gagne.
+
+    Un échec de page n'interrompt PAS le parcours : une version antérieure
+    s'arrêtait au premier échec, ce qui laissait le cache à quelques centaines
+    de logos si CoinGecko limitait le débit en cours de route.
     """
     nouveaux = 0
+    echecs = 0
     async with _session() as session:
         for page in range(1, NB_PAGES + 1):
             try:
                 logos = await _recuperer_page(session, page)
             except Exception as e:
                 log.warning(f"logos_crypto : échec page {page} ({e})")
-                continue
+                logos = None
 
-            if not logos:
-                break  # plus de résultats (ou blocage) — inutile d'insister
-
-            for ticker, url in logos.items():
-                if ticker not in _cache:
-                    _cache[ticker] = url
-                    nouveaux += 1
+            if logos is None:
+                echecs += 1
+                # On continue quand même : les pages suivantes peuvent passer.
+                # Au-delà de 3 échecs d'affilée, CoinGecko est manifestement
+                # indisponible — inutile d'insister pour ce cycle.
+                if echecs >= 3:
+                    log.warning("logos_crypto : trop d'échecs consécutifs, cycle interrompu")
+                    break
+            elif not logos:
+                break  # page vide = fin réelle du catalogue
+            else:
+                echecs = 0
+                for ticker, url in logos.items():
+                    if ticker not in _cache:
+                        _cache[ticker] = url
+                        nouveaux += 1
 
             if page < NB_PAGES:
                 await asyncio.sleep(DELAI_ENTRE_PAGES_SEC)
