@@ -455,15 +455,44 @@ function loadManifest(){
     })
     .catch(function(){ manifestCache = {}; return manifestCache; });
 }
+/* Table {TICKER: url} servie par /api/logos (CoinGecko, 18000+ cryptos).
+   Chargée une fois après connexion. Tant qu'elle est vide, on retombe
+   simplement sur cryptocurrency-icons : aucune icône cassée entre-temps. */
+var logosCoinGecko = {};
+function chargerLogos(){
+  apiFetch('/api/logos')
+    .then(function(map){
+      logosCoinGecko = map || {};
+      /* Re-rend les listes déjà affichées pour remplacer les icônes
+         génériques par les vraies, sans attendre le prochain cycle. */
+      if(loadedOnce.analytics) loadCryptosList();
+    })
+    .catch(function(){});
+}
+
 function iconImg(symbole, size){
   size = size || 26;
   var t = ticker(symbole);
-  var url = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/' + t + '.svg';
   var generic = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/generic.svg';
+  var lib = 'https://cdn.jsdelivr.net/npm/cryptocurrency-icons/svg/color/' + t + '.svg';
+  var cg = logosCoinGecko[t.toUpperCase()];
+  /* Ordre de repli : CoinGecko -> bibliothèque locale -> générique -> initiale.
+     Chaque échec de chargement passe à l'étape suivante via data-step. */
+  var premier = cg || lib;
+  var suivant = cg ? lib : generic;
   var letter = (t.charAt(0) || '?').toUpperCase();
-  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+url+'" alt="'+esc(t)+'" ' +
-    'onerror="if(this.dataset.step===\'2\'){this.outerHTML=\'<span class=&quot;icon-fallback&quot; style=&quot;width:'+size+'px;height:'+size+'px&quot;>'+letter+'</span>\';}else{this.dataset.step=\'2\';this.src=\''+generic+'\';}">';
+  return '<img class="icon-badge" style="width:'+size+'px;height:'+size+'px" src="'+premier+'" alt="'+esc(t)+'" ' +
+    'data-lib="'+lib+'" data-generic="'+generic+'" ' +
+    'onerror="cryptoIconFallback(this, \''+letter+'\', '+size+')">';
 }
+
+/* Repli progressif : appelé à chaque échec de chargement d'image. */
+window.cryptoIconFallback = function(img, letter, size){
+  var step = img.dataset.step || '0';
+  if(step === '0'){ img.dataset.step = '1'; img.src = img.dataset.lib; return; }
+  if(step === '1'){ img.dataset.step = '2'; img.src = img.dataset.generic; return; }
+  img.outerHTML = '<span class="icon-fallback" style="width:'+size+'px;height:'+size+'px">'+letter+'</span>';
+};
 
 /* ---------------- auth ---------------- */
 var TOKEN_KEY = 'arb_token';
