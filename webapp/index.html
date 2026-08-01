@@ -124,6 +124,18 @@ input[type=password],input[type=text],input[type=number]{
 .row-list{display:flex;flex-direction:column;gap:8px;}
 .list-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:var(--bg-elev2);font-size:13px;}
 .list-row.hl{outline:1px solid var(--green);background:var(--green-bg);}
+/* Ligne crypto : en-tête cliquable + liste d'exchanges dépliable */
+.crypto-row{flex-direction:column;align-items:stretch;}
+.crypto-head{display:flex;align-items:center;gap:10px;}
+.exch-info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+  padding:0;margin-left:2px;border-radius:50%;border:1px solid var(--text-dimmer);
+  background:transparent;color:var(--text-dimmer);font-size:10px;line-height:1;cursor:pointer;vertical-align:middle;}
+.exch-info:hover{border-color:var(--green);color:var(--green);}
+.exch-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;
+  border-top:1px solid var(--border);}
+.exch-link{font-size:11px;padding:3px 8px;border-radius:6px;background:var(--bg-elev);
+  color:var(--text-dim);text-decoration:none;white-space:nowrap;}
+a.exch-link:hover{color:var(--green);background:var(--green-bg);}
 .icon-badge{width:26px;height:26px;border-radius:50%;background:var(--bg-elev);flex-shrink:0;object-fit:cover;}
 .icon-fallback{width:26px;height:26px;border-radius:50%;background:var(--blue-bg);color:var(--blue);display:grid;place-items:center;font-size:11px;font-weight:800;flex-shrink:0;}
 .row-main{flex:1;min-width:0;}
@@ -840,34 +852,100 @@ function loadPerfDetail(){
   }).catch(function(){ qs('perfDetail').innerHTML = '<div class="empty-note">—</div>'; });
 }
 
-/* ---------------- cryptos list (live) ---------------- */
-var cryptoRowIndex = {};
+/* ---------------- liste des cryptos suivies ----------------
+   Deux sources alimentent cette liste :
+     - /api/cryptos  : nb d'exchanges, nb de trades, prix, variation 24h
+     - WebSocket     : le spread d'arbitrage en direct
+   Elles sont FUSIONNÉES dans cryptoData (indexé par symbole) — l'ancienne
+   version laissait l'instantané WebSocket écraser la liste entière, ce qui
+   effaçait les données de l'API (d'où les « — exch. · — trades »). */
+var cryptoData = {};
+
+/* URLs de trading spot par exchange. Formats standards ; si un lien tombe
+   sur une 404, c'est ici qu'il faut ajuster. */
+var EXCHANGE_URLS = {
+  binance: function(t){ return 'https://www.binance.com/en/trade/' + t + '_USDT'; },
+  bybit:   function(t){ return 'https://www.bybit.com/en/trade/spot/' + t + '/USDT'; },
+  okx:     function(t){ return 'https://www.okx.com/trade-spot/' + t.toLowerCase() + '-usdt'; },
+  kucoin:  function(t){ return 'https://www.kucoin.com/trade/' + t + '-USDT'; },
+  bitget:  function(t){ return 'https://www.bitget.com/spot/' + t + 'USDT'; },
+  gateio:  function(t){ return 'https://www.gate.io/trade/' + t + '_USDT'; }
+};
+
+function lienExchange(nom, symbole){
+  var t = ticker(symbole).toUpperCase();
+  var f = EXCHANGE_URLS[nom];
+  var url = f ? f(t) : null;
+  if(!url) return '<span class="exch-link">' + esc(nom) + '</span>';
+  return '<a class="exch-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(nom) + ' ↗</a>';
+}
+
+/* Tri : spread décroissant, puis les cryptos sans spread connu tout en bas
+   (elles gardent leur affichage, elles sont juste reléguées à la fin). */
+function trierCryptos(liste){
+  return liste.sort(function(a, b){
+    var sa = toNum(a.spread_net_pct), sb = toNum(b.spread_net_pct);
+    if(sa === null && sb === null) return a.symbole < b.symbole ? -1 : 1;
+    if(sa === null) return 1;
+    if(sb === null) return -1;
+    return sb - sa;
+  });
+}
+
+function rendreListeCryptos(){
+  var box = qs('cryptosList');
+  if(!box) return;
+  var liste = trierCryptos(Object.keys(cryptoData).map(function(s){ return cryptoData[s]; }));
+  if(!liste.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
+  box.innerHTML = liste.map(cryptoRowHtml).join('');
+}
+
 function loadCryptosList(){
   apiFetch('/api/cryptos').then(function(list){
-    list = list || [];
-    list.sort(function(a,b){
-      var va = toNum(a.variation_24h_pct), vb = toNum(b.variation_24h_pct);
-      if(va===null && vb===null) return 0;
-      if(va===null) return 1;
-      if(vb===null) return -1;
-      if(va>=0 && vb<0) return -1;
-      if(va<0 && vb>=0) return 1;
-      return vb - va;
+    (list || []).forEach(function(c){
+      var existant = cryptoData[c.symbole] || {};
+      /* On conserve les champs venant du WebSocket (spread_net_pct,
+         exchanges_spread, au_dessus_seuil) lors du rafraîchissement API. */
+      cryptoData[c.symbole] = Object.assign({}, existant, c);
     });
-    var box = qs('cryptosList');
-    cryptoRowIndex = {};
-    if(!list.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
-    box.innerHTML = list.map(function(c){ return cryptoRowHtml(c); }).join('');
-    box.querySelectorAll('[data-symbole]').forEach(function(row){ cryptoRowIndex[row.getAttribute('data-symbole')] = row; });
+    rendreListeCryptos();
   }).catch(function(){ qs('cryptosList').innerHTML = '<div class="empty-note">—</div>'; });
 }
+
 function cryptoRowHtml(c){
-  var v = toNum(c.variation_24h_pct);
-  return '<div class="list-row" data-symbole="' + esc(c.symbole) + '">' + iconImg(c.symbole) +
-    '<div class="row-main"><div class="row-symbole">' + esc(c.symbole) + '</div>' +
-    '<div class="row-sub">' + fmtNum(c.nb_exchanges) + ' exch. · ' + fmtNum(c.nb_trades) + ' trades</div></div>' +
-    '<div class="row-value ' + (v===null?'':(v>=0?'pos':'neg')) + '">' + (c.prix!=null? '$'+fmtNum(c.prix)+' · ':'') + fmtPct(c.variation_24h_pct,2) + '</div></div>';
+  var spread = toNum(c.spread_net_pct);
+  var classeSpread = spread === null ? '' : (spread >= 0 ? 'pos' : 'neg');
+  var txtSpread = spread === null ? '—' : fmtPct(spread, 3);
+  var paire = (c.exchanges_spread && c.exchanges_spread.length)
+    ? ' · <span class="row-sub">' + esc(c.exchanges_spread.join('/')) + '</span>' : '';
+
+  var exchanges = c.exchanges || [];
+  var boutonInfo = exchanges.length
+    ? '<button class="exch-info" type="button" aria-label="Voir les exchanges"' +
+      ' onclick="basculerExchanges(this)">?</button>' : '';
+  var listeExchanges = exchanges.length
+    ? '<div class="exch-list hidden">' + exchanges.map(function(e){
+        return lienExchange(e, c.symbole); }).join(' ') + '</div>' : '';
+
+  return '<div class="list-row crypto-row' + (c.au_dessus_seuil ? ' hl' : '') + '" data-symbole="' + esc(c.symbole) + '">' +
+    '<div class="crypto-head">' +
+      iconImg(c.symbole) +
+      '<div class="row-main">' +
+        '<div class="row-symbole">' + esc(c.symbole) + '</div>' +
+        '<div class="row-sub">' + fmtNum(c.nb_exchanges) + ' exch. ' + boutonInfo +
+          ' · ' + fmtNum(c.nb_trades) + ' trades</div>' +
+      '</div>' +
+      '<div class="row-value ' + classeSpread + '">' + txtSpread + paire + '</div>' +
+    '</div>' + listeExchanges +
+  '</div>';
 }
+
+window.basculerExchanges = function(btn){
+  var row = btn.closest('.crypto-row');
+  if(!row) return;
+  var liste = row.querySelector('.exch-list');
+  if(liste) liste.classList.toggle('hidden');
+};
 
 /* ---------------- trades view ---------------- */
 function refreshTrades(){
@@ -985,18 +1063,26 @@ function openSpreadSocket(){
   ws.onmessage = function(evt){
     var msg; try { msg = JSON.parse(evt.data); } catch(e){ return; }
     if(msg.type === 'snapshot' && msg.data){
-      var list = Object.keys(msg.data).map(function(sym){ return Object.assign({ symbole: sym }, msg.data[sym]); });
-      var box = qs('cryptosList');
-      cryptoRowIndex = {};
-      box.innerHTML = list.map(function(c){ return cryptoRowHtml(c); }).join('');
-      box.querySelectorAll('[data-symbole]').forEach(function(row){ cryptoRowIndex[row.getAttribute('data-symbole')] = row; });
+      /* Fusion, PAS remplacement : on ne garde du WebSocket que le spread et
+         sa paire d'exchanges, sans toucher aux champs venant de /api/cryptos. */
+      Object.keys(msg.data).forEach(function(sym){
+        var d = msg.data[sym] || {};
+        cryptoData[sym] = Object.assign({}, cryptoData[sym] || { symbole: sym }, {
+          spread_net_pct: d.spread_net_pct,
+          exchanges_spread: d.exchanges,
+          au_dessus_seuil: d.au_dessus_seuil
+        });
+      });
+      rendreListeCryptos();
     } else if(msg.type === 'spread' && msg.data){
-      var d = msg.data, row = cryptoRowIndex[d.symbole];
-      if(row){
-        row.classList.toggle('hl', !!d.au_dessus_seuil);
-        var valEl = row.querySelector('.row-value');
-        if(valEl) valEl.textContent = fmtPct(d.spread_net_pct, 2) + ' · ' + (d.exchanges||[]).join('/');
-      }
+      var d2 = msg.data;
+      cryptoData[d2.symbole] = Object.assign({}, cryptoData[d2.symbole] || { symbole: d2.symbole }, {
+        spread_net_pct: d2.spread_net_pct,
+        exchanges_spread: d2.exchanges,
+        au_dessus_seuil: d2.au_dessus_seuil
+      });
+      /* Réordonnancement en direct à chaque nouveau spread reçu. */
+      rendreListeCryptos();
     }
   };
 }
