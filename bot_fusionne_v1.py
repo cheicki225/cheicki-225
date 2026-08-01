@@ -57,6 +57,17 @@ class ExchangeWebSocket(ABC):
     async def get_subscribe_message(self) -> dict | None:
         return None
 
+    async def get_subscribe_messages(self) -> list[dict]:
+        """
+        Messages d'abonnement à envoyer. Par défaut, un seul (celui de
+        get_subscribe_message). Les exchanges qui limitent le nombre de
+        symboles par message (KuCoin : 100 max) surchargent cette méthode
+        pour découper en lots — sans quoi l'abonnement entier est rejeté
+        et l'exchange reste à zéro paire active.
+        """
+        msg = await self.get_subscribe_message()
+        return [msg] if msg else []
+
     @abstractmethod
     def parse_message(self, raw_message: str): ...
 
@@ -75,10 +86,12 @@ class ExchangeWebSocket(ABC):
                 ) as ws:
                     self.log.info("✅ Connecté")
                     reconnect_delay = 1
-                    sub_msg = await self.get_subscribe_message()
-                    if sub_msg:
+                    sub_messages = await self.get_subscribe_messages()
+                    for sub_msg in sub_messages:
                         await ws.send(json.dumps(sub_msg))
-                        self.log.info(f"Abonnement envoyé : {sub_msg}")
+                        self.log.info(f"Abonnement envoyé : {str(sub_msg)[:200]}")
+                        if len(sub_messages) > 1:
+                            await asyncio.sleep(0.3)  # respecte les limites de débit d'abonnement
                     async for message in ws:
                         if await self.handle_ping(ws, message):
                             continue
@@ -275,17 +288,40 @@ class KuCoinWS(ExchangeWebSocket):
         connect_id = str(int(time.time() * 1000))
         return f"{endpoint}?token={token}&connectId={connect_id}"
 
-    async def get_subscribe_message(self) -> dict:
-        topics = ",".join(f"{s}" for s in self.symbols)
-        return {
-            "id": str(int(time.time() * 1000)), "type": "subscribe",
-            "topic": f"/market/ticker:{topics}", "privateChannel": False, "response": True,
-        }
+    async def get_subscribe_messages(self) -> list[dict]:
+        """
+        KuCoin limite à 100 symboles par abonnement — au-delà, il rejette le
+        message ENTIER en silence (d'où les « 0 paires actives » observées le
+        01/08 avec ~144 symboles par connexion). On découpe donc en lots de 90,
+        avec une marge de sécurité sous la limite.
+
+        Chaque connexion obtient son propre jeton via bullet-public, donc son
+        propre quota de session : le découpage suffit, pas besoin de réduire
+        le nombre de paires surveillées.
+        """
+        TAILLE_LOT = 90
+        lots = [self.symbols[i:i + TAILLE_LOT] for i in range(0, len(self.symbols), TAILLE_LOT)]
+        return [
+            {
+                "id": str(int(time.time() * 1000) + i),
+                "type": "subscribe",
+                "topic": f"/market/ticker:{','.join(lot)}",
+                "privateChannel": False,
+                "response": True,
+            }
+            for i, lot in enumerate(lots)
+        ]
 
     async def handle_ping(self, ws, raw_message: str) -> bool:
         try:
             data = json.loads(raw_message)
-            if data.get("type") in ("welcome", "pong"):
+            type_msg = data.get("type")
+            if type_msg in ("welcome", "pong", "ack"):
+                return True
+            # KuCoin signale les abonnements refusés par un message d'erreur —
+            # sans ce log, un rejet passait totalement inaperçu
+            if type_msg == "error":
+                self.log.warning(f"Abonnement refusé : {raw_message[:300]}")
                 return True
         except json.JSONDecodeError:
             pass
