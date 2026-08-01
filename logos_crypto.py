@@ -39,9 +39,10 @@ log = logging.getLogger("logos_crypto")
 URL_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
 
 # Nombre de pages de 250 cryptos à récupérer (triées par capitalisation).
-# 8 pages = les 2000 plus grosses cryptos, ce qui couvre très largement
-# tout ce qui est listé sur Binance/Bybit/OKX/KuCoin/Bitget/Gate.io.
-NB_PAGES = 8
+# 20 pages = les 5000 plus grosses cryptos. La récupération initiale prend
+# environ 3 minutes (pages espacées pour respecter la limite de débit), ce
+# qui est sans conséquence puisqu'elle n'a lieu qu'une fois toutes les 12h.
+NB_PAGES = 20
 DELAI_ENTRE_PAGES_SEC = 8.0  # marge confortable sous la limite de débit
 
 _cache: dict[str, str] = {}  # {TICKER majuscule: url du logo}

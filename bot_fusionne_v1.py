@@ -459,6 +459,54 @@ class OpportuniteArbitrage:
         )
 
 
+def meilleur_spread_net(symbol: str):
+    """
+    Meilleur écart NET pour une crypto, SANS aucun seuil — y compris négatif.
+
+    Sert uniquement à l'affichage temps réel du panneau « Cryptos suivies » :
+    detecter_arbitrage_inter_exchange() écarte les spreads négatifs et ceux
+    sous le seuil de collecte, ce qui laissait la majorité des cryptos à « — ».
+    Ici on veut la valeur réelle, même défavorable (ex: -0.01%).
+
+    Les écarts absurdes (> SEUIL_ECART_ABSURDE_PCT) restent exclus : ce sont
+    des collisions de ticker, les afficher n'aurait aucun sens.
+
+    Retourne (spread_net_pct, [exchange_achat, exchange_vente]) ou None si
+    moins de deux exchanges ont un prix frais pour cette crypto.
+    """
+    prix_par_exchange = {}
+    for exchange, symbols_data in prix_live.items():
+        if symbol in symbols_data:
+            data = symbols_data[symbol]
+            if time.time() - data["timestamp"] < 3:
+                prix_par_exchange[exchange] = data
+
+    if len(prix_par_exchange) < 2:
+        return None
+
+    meilleur = None
+    for ex_achat, ex_vente in permutations(prix_par_exchange.keys(), 2):
+        prix_achat = prix_par_exchange[ex_achat]["ask"]
+        prix_vente = prix_par_exchange[ex_vente]["bid"]
+        if prix_achat <= 0:
+            continue
+
+        spread_brut_pct = ((prix_vente - prix_achat) / prix_achat) * 100
+        # Valeur ABSOLUE : une collision de ticker produit un écart énorme
+        # dans un sens (+9800%) et son miroir dans l'autre (-99%). Sans le
+        # abs(), le miroir négatif passerait le filtre et s'afficherait.
+        if abs(spread_brut_pct) > SEUIL_ECART_ABSURDE_PCT:
+            continue  # collision de ticker, déjà traitée par la détection principale
+
+        frais = FRAIS_TRADING_PCT.get(ex_achat, 0.10) + FRAIS_TRADING_PCT.get(ex_vente, 0.10)
+        spread_net_pct = spread_brut_pct - frais
+
+        if meilleur is None or spread_net_pct > meilleur[0]:
+            meilleur = (spread_net_pct, [ex_achat, ex_vente])
+
+    return meilleur
+
+
 def detecter_arbitrage_inter_exchange(symbol: str, seuil_pct: float = SEUIL_MIN_INTER_EXCHANGE_PCT) -> list[OpportuniteArbitrage]:
     opportunites = []
     prix_par_exchange = {}
@@ -647,20 +695,22 @@ async def verifier_opportunites_symbole(symbol: str):
 async def _traiter_opportunites_symbole(symbol: str, log):
     # Un seul calcul au seuil bas (ML) — sert à la fois pour l'alerte réelle
     # (filtrée ensuite) et la collecte ML, au lieu de calculer deux fois
+    seuil_inter_actif = telegram_menu_bot.etat_bot.seuil_inter_exchange
+
+    # Diffusion live (WebSocket, panneau "Cryptos suivies") — le VRAI meilleur
+    # écart net de cette crypto, même négatif (ex: -0.01%) et même sous le
+    # seuil de collecte. Fait AVANT le filtre ci-dessous : sinon la grande
+    # majorité des cryptos, dont l'écart est sous 0.05%, resteraient à « — ».
+    # diffuser_spread() n'envoie rien si la valeur n'a pas changé (pas de spam).
+    live = meilleur_spread_net(symbol)
+    if live is not None:
+        asyncio.create_task(spreads_live.diffuser_spread(
+            symbol, live[0], live[1], seuil_inter_actif
+        ))
+
     toutes = detecter_arbitrage_inter_exchange(symbol, seuil_pct=SEUIL_MIN_COLLECTE_ML_PCT)
     if not toutes:
         return
-
-    seuil_inter_actif = telegram_menu_bot.etat_bot.seuil_inter_exchange
-
-    # Diffusion live (WebSocket, panneau "Cryptos suivies") — le meilleur
-    # écart trouvé pour cette crypto à CE cycle, même s'il est sous le seuil
-    # d'alerte. diffuser_spread() se charge lui-même de ne rien envoyer si
-    # la valeur n'a pas changé depuis la dernière fois (pas de spam).
-    meilleure = max(toutes, key=lambda o: o.spread_net_pct)
-    asyncio.create_task(spreads_live.diffuser_spread(
-        symbol, meilleure.spread_net_pct, meilleure.exchanges, seuil_inter_actif
-    ))
 
     for opp in toutes:
         cle = f"{opp.type_arbitrage}:{'-'.join(opp.exchanges)}:{'-'.join(opp.symboles)}"
