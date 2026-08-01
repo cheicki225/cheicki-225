@@ -124,18 +124,29 @@ input[type=password],input[type=text],input[type=number]{
 .row-list{display:flex;flex-direction:column;gap:8px;}
 .list-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;background:var(--bg-elev2);font-size:13px;}
 .list-row.hl{outline:1px solid var(--green);background:var(--green-bg);}
-/* Ligne crypto : en-tête cliquable + liste d'exchanges dépliable */
+/* Ligne crypto + fenêtre des exchanges (survol 1,5 s sur ordinateur, clic partout) */
 .crypto-row{flex-direction:column;align-items:stretch;}
 .crypto-head{display:flex;align-items:center;gap:10px;}
+.exch-wrap{position:relative;display:inline-block;vertical-align:middle;}
 .exch-info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
-  padding:0;margin-left:2px;border-radius:50%;border:1px solid var(--text-dimmer);
-  background:transparent;color:var(--text-dimmer);font-size:10px;line-height:1;cursor:pointer;vertical-align:middle;}
+  padding:0;margin:0 2px;border-radius:50%;border:1px solid var(--text-dimmer);
+  background:transparent;color:var(--text-dimmer);font-size:10px;line-height:1;cursor:pointer;}
 .exch-info:hover{border-color:var(--green);color:var(--green);}
-.exch-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;
-  border-top:1px solid var(--border);}
-.exch-link{font-size:11px;padding:3px 8px;border-radius:6px;background:var(--bg-elev);
-  color:var(--text-dim);text-decoration:none;white-space:nowrap;}
-a.exch-link:hover{color:var(--green);background:var(--green-bg);}
+.exch-popup{position:absolute;top:calc(100% + 6px);left:-8px;z-index:60;min-width:190px;
+  padding:6px;border-radius:12px;background:var(--bg-elev2);border:1px solid var(--border);
+  box-shadow:0 12px 32px rgba(0,0,0,.55);animation:popIn .14s ease;}
+@keyframes popIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
+.exch-popup-titre{font-size:10px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--text-dimmer);padding:4px 8px 6px;}
+.exch-link{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;
+  color:var(--text);text-decoration:none;font-size:12.5px;}
+a.exch-link:hover{background:var(--bg-elev);}
+.exch-logo{width:16px;height:16px;border-radius:4px;flex-shrink:0;}
+.exch-nom{flex:1;text-transform:capitalize;}
+.exch-fleche{color:var(--text-dimmer);font-size:11px;}
+a.exch-link:hover .exch-fleche{color:var(--green);}
+/* Sur écran étroit, la fenêtre est ancrée à gauche pour ne pas déborder */
+@media (max-width:520px){ .exch-popup{left:auto;right:-8px;} }
 .icon-badge{width:26px;height:26px;border-radius:50%;background:var(--bg-elev);flex-shrink:0;object-fit:cover;}
 .icon-fallback{width:26px;height:26px;border-radius:50%;background:var(--blue-bg);color:var(--blue);display:grid;place-items:center;font-size:11px;font-weight:800;flex-shrink:0;}
 .row-main{flex:1;min-width:0;}
@@ -877,12 +888,27 @@ var EXCHANGE_URLS = {
   gateio:  function(t){ return 'https://www.gate.io/trade/' + t + '_USDT'; }
 };
 
+/* Domaines des exchanges, pour récupérer leur favicon via le service Google. */
+var EXCHANGE_DOMAINES = {
+  binance:'binance.com', bybit:'bybit.com', okx:'okx.com',
+  kucoin:'kucoin.com', bitget:'bitget.com', gateio:'gate.io'
+};
+
+function logoExchange(nom){
+  var d = EXCHANGE_DOMAINES[nom];
+  if(!d) return '';
+  return '<img class="exch-logo" src="https://www.google.com/s2/favicons?domain=' +
+    encodeURIComponent(d) + '&sz=32" alt="" loading="lazy">';
+}
+
 function lienExchange(nom, symbole){
   var t = ticker(symbole).toUpperCase();
   var f = EXCHANGE_URLS[nom];
   var url = f ? f(t) : null;
-  if(!url) return '<span class="exch-link">' + esc(nom) + '</span>';
-  return '<a class="exch-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(nom) + ' ↗</a>';
+  var contenu = logoExchange(nom) + '<span class="exch-nom">' + esc(nom) + '</span>';
+  if(!url) return '<span class="exch-link">' + contenu + '</span>';
+  return '<a class="exch-link" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' +
+    contenu + '<span class="exch-fleche">↗</span></a>';
 }
 
 /* Tri : spread décroissant, puis les cryptos sans spread connu tout en bas
@@ -897,9 +923,15 @@ function trierCryptos(liste){
   });
 }
 
+/* Symbole dont la fenêtre d'exchanges est ouverte. Tant qu'une fenêtre est
+   ouverte, on suspend le réordonnancement de la liste : sinon chaque nouveau
+   spread reçu détruirait la fenêtre pendant que l'utilisateur vise un lien. */
+var popupOuvert = null;
+
 function rendreListeCryptos(){
   var box = qs('cryptosList');
   if(!box) return;
+  if(popupOuvert) return;  // rendu suspendu, les données restent à jour en mémoire
   var liste = trierCryptos(Object.keys(cryptoData).map(function(s){ return cryptoData[s]; }));
   if(!liste.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
   box.innerHTML = liste.map(cryptoRowHtml).join('');
@@ -925,32 +957,82 @@ function cryptoRowHtml(c){
     ? ' · <span class="row-sub">' + esc(c.exchanges_spread.join('/')) + '</span>' : '';
 
   var exchanges = c.exchanges || [];
-  var boutonInfo = exchanges.length
-    ? '<button class="exch-info" type="button" aria-label="Voir les exchanges"' +
-      ' onclick="basculerExchanges(this)">?</button>' : '';
-  var listeExchanges = exchanges.length
-    ? '<div class="exch-list hidden">' + exchanges.map(function(e){
-        return lienExchange(e, c.symbole); }).join(' ') + '</div>' : '';
+  var bloc = '';
+  if(exchanges.length){
+    bloc = '<span class="exch-wrap" data-sym="' + esc(c.symbole) + '">' +
+      '<button class="exch-info" type="button" aria-label="Exchanges disponibles"' +
+      ' onclick="basculerExchanges(this)"' +
+      ' onmouseenter="survolExchanges(this, true)"' +
+      ' onmouseleave="survolExchanges(this, false)">?</button>' +
+      '<div class="exch-popup hidden"' +
+      ' onmouseenter="maintenirPopup(this, true)"' +
+      ' onmouseleave="maintenirPopup(this, false)">' +
+        '<div class="exch-popup-titre">Disponible sur</div>' +
+        exchanges.map(function(e){ return lienExchange(e, c.symbole); }).join('') +
+      '</div>' +
+    '</span>';
+  }
 
   return '<div class="list-row crypto-row' + (c.au_dessus_seuil ? ' hl' : '') + '" data-symbole="' + esc(c.symbole) + '">' +
     '<div class="crypto-head">' +
       iconImg(c.symbole) +
       '<div class="row-main">' +
         '<div class="row-symbole">' + esc(c.symbole) + '</div>' +
-        '<div class="row-sub">' + fmtNum(c.nb_exchanges) + ' exch. ' + boutonInfo +
+        '<div class="row-sub">' + fmtNum(c.nb_exchanges) + ' exch. ' + bloc +
           ' · ' + fmtNum(c.nb_trades) + ' trades</div>' +
       '</div>' +
       '<div class="row-value ' + classeSpread + '">' + txtSpread + paire + '</div>' +
-    '</div>' + listeExchanges +
+    '</div>' +
   '</div>';
 }
 
+/* --- Fenêtre des exchanges : survol (1,5 s) sur ordinateur, clic partout --- */
+var minuterieSurvol = null;
+
+function ouvrirPopup(popup){
+  fermerTousPopups();
+  popup.classList.remove('hidden');
+  var wrap = popup.closest('.exch-wrap');
+  popupOuvert = wrap ? wrap.getAttribute('data-sym') : null;
+}
+
+function fermerTousPopups(){
+  document.querySelectorAll('.exch-popup').forEach(function(p){ p.classList.add('hidden'); });
+  popupOuvert = null;
+}
+
 window.basculerExchanges = function(btn){
-  var row = btn.closest('.crypto-row');
-  if(!row) return;
-  var liste = row.querySelector('.exch-list');
-  if(liste) liste.classList.toggle('hidden');
+  clearTimeout(minuterieSurvol);
+  var popup = btn.parentNode.querySelector('.exch-popup');
+  if(!popup) return;
+  if(popup.classList.contains('hidden')) ouvrirPopup(popup);
+  else fermerTousPopups();
 };
+
+window.survolExchanges = function(btn, entre){
+  /* Pas de survol sur écran tactile : le clic reste le seul déclencheur. */
+  if(!window.matchMedia || !window.matchMedia('(hover: hover)').matches) return;
+  var popup = btn.parentNode.querySelector('.exch-popup');
+  if(!popup) return;
+  clearTimeout(minuterieSurvol);
+  minuterieSurvol = setTimeout(function(){
+    if(entre) ouvrirPopup(popup); else fermerTousPopups();
+  }, entre ? 1500 : 250);
+};
+
+/* Garde la fenêtre ouverte quand la souris passe du bouton vers la fenêtre. */
+window.maintenirPopup = function(popup, entre){
+  clearTimeout(minuterieSurvol);
+  if(!entre) minuterieSurvol = setTimeout(fermerTousPopups, 250);
+};
+
+/* Un clic ailleurs referme la fenêtre (et relance le réordonnancement). */
+document.addEventListener('click', function(e){
+  if(popupOuvert && !e.target.closest('.exch-wrap')){
+    fermerTousPopups();
+    rendreListeCryptos();
+  }
+});
 
 /* ---------------- trades view ---------------- */
 function refreshTrades(){
