@@ -501,11 +501,33 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         emoji_liq = "🟢" if pct_dispo >= 95 else "🟡" if pct_dispo >= 20 else "🔴"
         ligne_liquidite = f"{emoji_liq} Liquidité : {montant_reel:.2f}$ / {montant_usdt:.0f}$ visés ({pct_dispo:.0f}%)\n"
 
+        # Prix top-of-book annoncés dans l'alerte vs prix réellement obtenus en
+        # profondeur de carnet. L'écart dit si l'opportunité a tenu ses promesses :
+        # achat au-dessus de l'annoncé = payé plus cher que prévu (défavorable),
+        # vente en dessous = revendu moins cher que prévu (défavorable aussi).
+        p_achat_ann = getattr(opp, "prix_achat_annonce", None)
+        p_vente_ann = getattr(opp, "prix_vente_annonce", None)
+        if p_achat_ann and p_vente_ann:
+            ecart_achat = (prix_achat - p_achat_ann) / p_achat_ann * 100
+            ecart_vente = (prix_vente - p_vente_ann) / p_vente_ann * 100
+            # Jugé sur l'EFFET NET, pas sur chaque prix isolément : payer un peu
+            # plus cher à l'achat n'est pas grave si la vente compense largement.
+            # C'est l'écart entre spread réel et spread annoncé qui compte vraiment.
+            ecart_net = spread_reel_pct - opp.spread_net_pct
+            emoji_ecart = "✅" if ecart_net >= -0.05 else "⚠️"
+            ligne_annonce = (
+                f"📢 Annoncé : achat {p_achat_ann:.6g}$ / vente {p_vente_ann:.6g}$\n"
+                f"{emoji_ecart} Écart exécution : achat {ecart_achat:+.3f}% · vente {ecart_vente:+.3f}%\n"
+            )
+        else:
+            ligne_annonce = ""
+
         asyncio.create_task(telegram_notifier.envoyer_message_simple(
             f"🧪 <b>Trade papier {emoji}</b>\n\n"
             f"{symbol} : {ex_achat} → {ex_vente}\n"
             f"Acheté : {montant_reel:.2f}$ → {quantite:.6g} {base_asset} @ {prix_achat:.6g}$\n"
             f"Vendu : {quantite:.6g} {base_asset} → {montant_vente_brut:.2f}$ @ {prix_vente:.6g}$\n"
+            f"{ligne_annonce}"
             f"{ligne_liquidite}"
             f"Spread réel : {spread_reel_pct:.3f}% (affiché {opp.spread_net_pct:.3f}%)\n"
             f"Double vérif : {'OK' if double_verif_ok else 'ÉCHEC'}\n"

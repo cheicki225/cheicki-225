@@ -443,6 +443,12 @@ class OpportuniteArbitrage:
     timestamp: float = field(default_factory=time.time)
     score_ml: float | None = None  # probabilité (0-1) que l'opportunité tienne 5s, voir filtre_ml.py
     liquidite_info: dict | None = None  # vraie profondeur de carnet au moment de l'alerte (inter-exchange uniquement)
+    # Prix top-of-book au moment de la DÉTECTION (ceux annoncés dans l'alerte).
+    # Servent à comparer avec les prix d'exécution réels calculés plus tard en
+    # profondeur de carnet — c'est l'écart entre les deux qui dit si une
+    # opportunité tient vraiment ses promesses à l'exécution.
+    prix_achat_annonce: float | None = None
+    prix_vente_annonce: float | None = None
 
     def __str__(self):
         return (
@@ -495,6 +501,7 @@ def detecter_arbitrage_inter_exchange(symbol: str, seuil_pct: float = SEUIL_MIN_
                 description=f"Acheter {symbol} sur {ex_achat} @ {prix_achat} -> Vendre sur {ex_vente} @ {prix_vente}",
                 spread_brut_pct=spread_brut_pct, frais_total_pct=frais_total_pct,
                 spread_net_pct=spread_net_pct, exchanges=[ex_achat, ex_vente], symboles=[symbol],
+                prix_achat_annonce=prix_achat, prix_vente_annonce=prix_vente,
             ))
 
     return opportunites
