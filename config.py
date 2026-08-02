@@ -291,7 +291,25 @@ FRAIS_TRANSFERT_SIMULE_USDT = 0.5
 #
 # Mets SUIVI_STOCKS_ACTIF à False pour revenir à l'ancien comportement
 # (aucune contrainte de stock, chiffres plus flatteurs mais irréalistes).
-SUIVI_STOCKS_ACTIF = True
+SUIVI_STOCKS_ACTIF = False
+# Désactivé le 02/08 à la demande : le bot s'arrêtait de trader au bout de
+# quelques minutes, une fois les 10 emplacements pris (ou, plus tôt encore,
+# le capital d'une plateforme épuisé — 200$ ne financent que 4 positions
+# de 50$, et les alertes se concentrent sur kucoin/gateio).
+#
+# ⚠️ CE QUE ÇA CHANGE DANS L'INTERPRÉTATION DES CHIFFRES
+# Le bot simule désormais des ventes de tokens qu'il ne détient pas. Dans la
+# réalité c'est impossible : vendre sur kucoin suppose d'y avoir déjà le
+# token. Les résultats deviennent donc PLUS FLATTEURS et MOINS RÉALISTES —
+# ils décrivent un monde sans contrainte de capital ni de pré-positionnement.
+# Le Profit Factor, déjà à ~88 (contre 2 à 3 pour une vraie bonne stratégie),
+# va encore monter. Ce n'est pas une amélioration de performance : c'est la
+# disparition d'une contrainte qui existe bel et bien.
+#
+# En contrepartie — et c'est le but ici — le bot ne s'arrête plus, donc la
+# collecte de données pour le ML et le suivi des spreads tourne en continu.
+#
+# Remets à True pour retrouver une simulation contrainte et réaliste.
 
 # Nombre de tokens DIFFÉRENTS que tu peux tenir en stock simultanément.
 # Avec 1200$ répartis sur 6 plateformes, en immobilisant 50$ par token,
