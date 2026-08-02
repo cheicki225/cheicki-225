@@ -444,12 +444,14 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     frais_trading_usdt = montant_reel * (frais_pct_total / 100)
 
     # Frais de RETRAIT : boucler un arbitrage suppose de rapatrier les fonds
-    # vers la plateforme d'achat. C'est un coût FIXE en dollars — donc
-    # proportionnellement écrasant sur un petit trade (1$ sur 50$ = 2%, soit
-    # plus que l'écart lui-même dans la plupart des cas).
-    # Ignorer ce coût surestimait fortement le profit affiché.
+    # de la plateforme de vente vers celle d'achat. Le coût dépend du réseau
+    # le moins cher utilisable DES DEUX CÔTÉS — un réseau bon marché que la
+    # destination n'accepte pas ne compte pas.
+    # C'est un coût FIXE en dollars, donc proportionnellement écrasant sur un
+    # petit trade (1$ sur 50$ = 2%, soit plus que l'écart lui-même).
     import frais_retrait
-    frais_retrait_usdt = frais_retrait.frais_retrait_usdt(ex_vente)
+    info_retrait = frais_retrait.frais_transfert(ex_vente, ex_achat, montant_reel)
+    frais_retrait_usdt = info_retrait["frais"]
 
     frais_usdt = frais_trading_usdt + frais_retrait_usdt
     profit_net_usdt = montant_reel * (spread_reel_pct / 100) - frais_usdt
@@ -532,8 +534,7 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         else:
             ligne_annonce = ""
 
-        detail_frais = frais_retrait.detail(ex_vente)
-        marque = " (estimé)" if detail_frais["est_estime"] else ""
+        marque = " (estimé)" if info_retrait["est_estime"] else f" via {info_retrait['reseau']}"
         ligne_frais = (
             f"Frais : transaction {frais_trading_usdt:.3f}$ + "
             f"retrait {frais_retrait_usdt:.3f}${marque} = {frais_usdt:.3f}$\n"
