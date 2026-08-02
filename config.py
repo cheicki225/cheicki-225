@@ -161,13 +161,16 @@ RESEAU_FALLBACK = "TRC20"
 #   1. l'alerte d'opportunité elle-même   (bot_fusionne_v1 -> envoyer_alerte)
 #   2. le résultat du trade papier         (paper_trading.simuler_trade)
 #   3. le résumé du suivi 10s              (suivi_opportunite) [ajouté le 02/08]
+#   4. la clôture d'une position en attente (positions_attente) [ajouté le 02/08]
 #
-# 6 alertes/minute x 3 messages = 18 messages/minute, sous la limite de 20.
-# (Avec l'ancienne valeur de 8 : 8 x 3 = 24/minute, AU-DESSUS de la limite —
-#  d'où la baisse à 6 en même temps que l'ajout du suivi 10s.)
+# 5 alertes/minute x 4 messages = 20 messages/minute, à la limite exacte.
+# (8 x 3 = 24 et 6 x 4 = 24 étaient tous deux AU-DESSUS de la limite — d'où
+#  les baisses successives 8 -> 6 -> 5 à chaque nouveau type de message.)
+# En pratique les clôtures de positions sont bornées par MAX_POSITIONS_EN_ATTENTE
+# (3), donc la charge réelle reste bien en dessous de ce pire cas théorique.
 # En pratique c'est encore moins, car le résumé de suivi n'est envoyé que
 # s'il est informatif (voir SUIVI_ENVOYER_SEULEMENT_SI_POSITIF ci-dessous).
-MAX_ALERTES_PAR_MINUTE = 6
+MAX_ALERTES_PAR_MINUTE = 5
 
 # Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
 # la combinaison d'exchanges — évite qu'une crypto volatile ne déclenche
@@ -297,3 +300,40 @@ MAX_TOKENS_EN_STOCK = 10
 
 # Valeur immobilisée par token, sur la plateforme où tu comptes vendre
 VALEUR_STOCK_PAR_TOKEN_USDT = 50.0
+
+
+# ============================================================
+# POSITIONS EN ATTENTE (idée à tester — mode papier uniquement)
+# ============================================================
+# PRINCIPE : quand un trade se retrouve négatif au moment de la vente
+# (l'écart s'est refermé), au lieu d'encaisser la perte tout de suite, on
+# garde la position et on vend automatiquement dès que ça repasse positif.
+#
+# ⚠️ POURQUOI LES TROIS LIMITES CI-DESSOUS SONT INDISPENSABLES
+# Sans elles, cette stratégie plafonne les gains (on vend dès +0.01$) mais
+# laisse courir les pertes (on ne vend jamais tant que c'est négatif). Pire,
+# elle fausse complètement les statistiques : une position jamais clôturée
+# n'apparaît JAMAIS comme une perte, donc le taux de réussite grimpe vers
+# 100% pendant que du capital dort dans des positions perdantes invisibles.
+# Les limites garantissent que CHAQUE position finit par être enregistrée,
+# gagnante ou perdante.
+POSITIONS_ATTENTE_ACTIF = True
+
+# Durée maximale d'attente. Au-delà : vente au prix du marché, quel qu'il
+# soit, et l'emplacement est libéré. 30 min = compromis entre laisser une
+# chance au prix de revenir et ne pas bloquer le capital trop longtemps.
+DUREE_MAX_ATTENTE_SEC = 1800
+
+# Stop-loss par position, en % du montant engagé. En dessous, on coupe sans
+# attendre la fin du délai — c'est la protection contre un token qui
+# s'effondre au lieu de remonter.
+STOP_LOSS_POSITION_PCT = -3.0
+
+# Plafond de positions simultanément en attente. Chaque position occupe un
+# emplacement de stock (MAX_TOKENS_EN_STOCK = 10) : en réserver trop
+# empêcherait le bot de continuer à trader normalement.
+MAX_POSITIONS_EN_ATTENTE = 3
+
+# Fréquence de vérification des positions (secondes). Lecture dans le cache
+# WebSocket, aucun appel réseau — 5s est largement suffisant.
+INTERVALLE_VERIF_ATTENTE_SEC = 5.0

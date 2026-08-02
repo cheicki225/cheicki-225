@@ -26,6 +26,7 @@ import health_manager
 import paper_trading
 import api_server
 import suivi_opportunite
+import positions_attente
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1183,6 +1184,13 @@ async def main():
     tasks.append(asyncio.create_task(prix_24h.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
+
+    # Positions en attente : la surveillance a besoin du cache de prix
+    # WebSocket pour savoir quand une position repasse positive. On le lui
+    # transmet explicitement plutôt que par import croisé.
+    positions_attente.definir_source_prix(prix_live)
+    positions_attente.charger_positions()
+    tasks.append(asyncio.create_task(positions_attente.boucle_surveillance()))
 
     await asyncio.gather(*tasks)
 

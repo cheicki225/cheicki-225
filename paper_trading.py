@@ -592,6 +592,34 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     frais_usdt = frais_trading_usdt + frais_retrait_usdt
     profit_net_usdt = montant_reel * (spread_reel_pct / 100) - frais_usdt
 
+    # --- POSITION EN ATTENTE ---
+    # Le trade serait perdant : au lieu d'encaisser la perte maintenant, on
+    # peut garder la position et vendre automatiquement dès qu'elle repasse
+    # positive (voir positions_attente.py). Trois garde-fous bornent
+    # l'attente : durée max, stop-loss, et nombre d'emplacements.
+    # Le résultat FINAL sera enregistré à la clôture via
+    # enregistrer_resultat_position_attente() — rien n'est perdu pour les
+    # statistiques, c'est juste comptabilisé plus tard.
+    if profit_net_usdt <= 0:
+        try:
+            import positions_attente
+            if positions_attente.ouvrir(
+                symbole=symbol, exchange_achat=ex_achat, exchange_vente=ex_vente,
+                montant_usdt=montant_reel, prix_achat=resultat["prix_achat_reel"],
+                profit_initial_usdt=profit_net_usdt, frais_usdt=frais_usdt,
+            ):
+                if notifier:
+                    asyncio.create_task(_notifier_mise_en_attente(
+                        symbol, ex_achat, ex_vente, montant_reel, profit_net_usdt
+                    ))
+                return {
+                    "execute": False, "raison": "mis en attente",
+                    "en_attente": True, "profit_potentiel_evite": profit_net_usdt,
+                }
+        except Exception as e:
+            # Ne doit jamais empêcher le trade normal de se dérouler
+            log.error(f"Échec mise en attente ({symbol}) : {e} — trade traité normalement")
+
     # Rentable seulement si l'écart couvre TOUS les frais, retrait compris
     double_verif_ok = profit_net_usdt > 0
 
@@ -702,6 +730,63 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
         log.error(f"Échec notification trade papier : {e}")
 
     return {"execute": True, "profit_usdt": profit_net_usdt, "spread_reel_pct": spread_reel_pct, "succes": succes}
+
+
+async def _notifier_mise_en_attente(symbole, ex_achat, ex_vente, montant_usdt, profit_initial):
+    """Alerte Telegram quand une position est mise en attente au lieu d'être vendue à perte."""
+    try:
+        import telegram_notifier
+        import positions_attente
+        from config import MAX_POSITIONS_EN_ATTENTE, DUREE_MAX_ATTENTE_SEC, STOP_LOSS_POSITION_PCT
+
+        await telegram_notifier.envoyer_message_simple(
+            f"⏳ <b>Position mise en attente</b>\n\n"
+            f"{symbole} : {ex_achat} → {ex_vente}\n"
+            f"Montant : {montant_usdt:.2f}$\n"
+            f"Vente immédiate donnerait : {profit_initial:+.3f}$\n"
+            f"→ On attend que ça repasse positif\n\n"
+            f"Emplacements : {positions_attente.nb_positions_ouvertes()}/{MAX_POSITIONS_EN_ATTENTE}\n"
+            f"Sortie forcée après {DUREE_MAX_ATTENTE_SEC // 60} min "
+            f"ou à {STOP_LOSS_POSITION_PCT}%"
+        )
+    except Exception as e:
+        log.error(f"Échec notification mise en attente : {e}")
+
+
+def enregistrer_resultat_position_attente(symbole, exchange_achat, exchange_vente,
+                                          montant_usdt, prix_achat, prix_vente,
+                                          profit_usdt, frais_usdt):
+    """
+    Enregistre dans les statistiques papier le résultat FINAL d'une position
+    qui avait été mise en attente. Appelé par positions_attente._cloturer().
+
+    Indispensable pour l'honnêteté des chiffres : sans ça, un trade dérouté
+    vers l'attente disparaîtrait des statistiques s'il finit perdant, et le
+    taux de réussite afficherait un chiffre flatteur mais faux.
+    """
+    _init_csv()
+
+    succes = profit_usdt > 0
+    _ecrire_ligne({
+        "timestamp": time.time(), "symbole": symbole,
+        "exchange_achat": exchange_achat, "exchange_vente": exchange_vente,
+        "montant_usdt": round(montant_usdt, 4), "spread_affiche_pct": "",
+        "prix_achat_reel": prix_achat, "prix_vente_reel": prix_vente,
+        "spread_reel_pct": "", "liquidite_suffisante": True,
+        "double_verification_ok": succes,
+        "profit_usdt": round(profit_usdt, 4), "frais_usdt": round(frais_usdt, 4),
+    })
+
+    _etat_papier["nb_trades_reussis"] += 1 if succes else 0
+    _etat_papier["profit_cumule_usdt"] += profit_usdt
+    if not succes:
+        _etat_papier["nb_trades_rejetes_double_verif"] += 1
+
+    _enregistrer_resultat_et_verifier_elimination(symbole, succes=succes)
+    _verifier_circuit_breaker_global(succes=succes)
+    _verifier_stop_loss_journalier(profit_usdt)
+    _enregistrer_score_crypto(symbole, succes=succes)
+    _appliquer_mouvement_trade(exchange_achat, exchange_vente, montant_usdt, profit_usdt)
 
 
 def stats_papier():

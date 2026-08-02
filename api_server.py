@@ -131,7 +131,23 @@ async def handler_papier(request):
         # le frontend doit afficher "—" plutôt qu'un chiffre inventé.
         "profit_factor": paper_trading.calculer_profit_factor(),
         "average_rr": paper_trading.calculer_average_rr(),
+        # Positions en attente : sans ça, du capital peut être immobilisé
+        # sans qu'aucun écran ne le montre (le problème exact qu'ont eu les
+        # stocks de tokens, invisibles jusqu'à ce qu'ils bloquent tout).
+        "positions_attente": _statistiques_attente(),
     })
+
+
+def _statistiques_attente() -> dict:
+    """Bilan des positions en attente — {} si le module est absent ou désactivé."""
+    try:
+        import positions_attente
+        stats = positions_attente.statistiques()
+        stats["liste"] = positions_attente.positions_ouvertes()
+        stats["places_disponibles"] = positions_attente.places_disponibles()
+        return stats
+    except Exception:
+        return {}
 
 
 async def handler_equity_curve(request):
