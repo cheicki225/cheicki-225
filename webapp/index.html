@@ -738,15 +738,22 @@ function refreshDashboard(){
     el.className = 'value ' + (profit===null? '' : (profit>=0? 'pos':'neg'));
     qs('profitSub').textContent = 'Capital fictif : ' + fmtNum(p.capital_initial) + '$ de départ';
 
-    var total = toNum(p.nb_trades_total), reussis = toNum(p.nb_trades_reussis);
-    var pct = (total && total>0 && reussis!==null) ? Math.round((reussis/total)*100) : 0;
+    // Taux de réussite = réussis / trades RÉELLEMENT EXÉCUTÉS.
+    // Avant, on divisait par nb_trades_total (= trades TENTÉS), donc chaque
+    // rejet pour liquidité ou stock manquant faisait baisser le pourcentage
+    // comme s'il s'agissait d'un trade perdant — alors qu'aucun trade n'a
+    // été tenté. Repli sur nb_trades_total si l'API est plus ancienne.
+    var executes = toNum(p.nb_trades_executes);
+    if (executes === null) executes = toNum(p.nb_trades_total);
+    var reussis = toNum(p.nb_trades_reussis);
+    var pct = (executes && executes>0 && reussis!==null) ? Math.round((reussis/executes)*100) : 0;
     var gaugeColor = pct >= 60 ? 'var(--green)' : (pct >= 40 ? 'var(--amber)' : 'var(--red)');
     var gaugeEl = qs('gaugeTaux');
     gaugeEl.style.setProperty('--pct', String(pct));
     gaugeEl.style.setProperty('--gauge-color', gaugeColor);
-    qs('tauxReussite').textContent = (total? pct + '%' : '—');
+    qs('tauxReussite').textContent = (executes? pct + '%' : '—');
 
-    qs('tradesExec').textContent = fmtNum(p.nb_trades_total);
+    qs('tradesExec').textContent = fmtNum(executes);
     qs('profitFactorVal').textContent = dash(p.profit_factor, function(n){ return n.toFixed(2); });
     qs('avgRrVal').textContent = dash(p.average_rr, function(n){ return n.toFixed(2); });
 
