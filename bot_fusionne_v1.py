@@ -461,7 +461,8 @@ from config import (
     SEUIL_CHUTE_PAIRES_ALERTE_PCT, COOLDOWN_ALERTE_CHUTE_SEC,
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
-    SUIVI_ACTIF,
+    SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
+    MONTANT_PAR_TRADE_USDT,
 )
 import filtre_ml
 import spreads_live
@@ -489,6 +490,18 @@ class OpportuniteArbitrage:
     # opportunité tient vraiment ses promesses à l'exécution.
     prix_achat_annonce: float | None = None
     prix_vente_annonce: float | None = None
+    # Bénéfice RÉELLEMENT attendu : spread_net_pct MOINS les frais de retrait
+    # nécessaires pour rapatrier les fonds et boucler le cycle. C'est ce
+    # chiffre qui décide de l'alerte quand SEUIL_BENEFICE_REEL_ACTIF=True.
+    #
+    # ⚠️ Volontairement SÉPARÉ de spread_net_pct plutôt que de le remplacer :
+    # spread_net_pct est la cible du pipeline ML (opportunity_logger le
+    # relogge, le modèle est entraîné dessus). En changer la définition
+    # rendrait incohérentes toutes les données déjà collectées.
+    benefice_reel_pct: float | None = None
+    frais_retrait_pct: float | None = None
+    reseau_retrait: str | None = None
+    frais_retrait_estime: bool = False
 
     def __str__(self):
         return (
@@ -584,15 +597,51 @@ def detecter_arbitrage_inter_exchange(symbol: str, seuil_pct: float = SEUIL_MIN_
         spread_net_pct = spread_brut_pct - frais_total_pct
 
         if spread_net_pct >= seuil_pct:
-            opportunites.append(OpportuniteArbitrage(
+            opportunite = OpportuniteArbitrage(
                 type_arbitrage="inter_exchange",
                 description=f"Acheter {symbol} sur {ex_achat} @ {prix_achat} -> Vendre sur {ex_vente} @ {prix_vente}",
                 spread_brut_pct=spread_brut_pct, frais_total_pct=frais_total_pct,
                 spread_net_pct=spread_net_pct, exchanges=[ex_achat, ex_vente], symboles=[symbol],
                 prix_achat_annonce=prix_achat, prix_vente_annonce=prix_vente,
-            ))
+            )
+            _renseigner_benefice_reel(opportunite)
+            opportunites.append(opportunite)
 
     return opportunites
+
+
+def _renseigner_benefice_reel(opp: OpportuniteArbitrage):
+    """
+    Complète une opportunité inter-exchange avec son bénéfice RÉEL, frais de
+    retrait compris (le seul chiffre qui dit si le cycle serait rentable).
+
+    Les frais de retrait sont FIXES en dollars : leur poids en pourcentage
+    dépend donc entièrement de MONTANT_PAR_TRADE_USDT. C'est pour ça qu'un
+    seuil unique en % ne peut pas être juste pour toutes les paires à la
+    fois, et que ce calcul est fait par paire plutôt qu'approximé.
+
+    frais_retrait.frais_transfert() est purement local (données chargées au
+    démarrage, rafraîchies toutes les 6h) et mis en cache — appelable sans
+    souci dans la boucle de détection.
+    """
+    try:
+        ex_achat, ex_vente = opp.exchanges
+        # Sens du transfert : les fonds reviennent de la plateforme de VENTE
+        # vers celle d'ACHAT pour pouvoir recommencer un cycle.
+        info = frais_retrait.frais_transfert(ex_vente, ex_achat, MONTANT_PAR_TRADE_USDT)
+        frais_pct = (info["frais"] / MONTANT_PAR_TRADE_USDT) * 100 if MONTANT_PAR_TRADE_USDT else 0.0
+
+        opp.frais_retrait_pct = round(frais_pct, 4)
+        opp.benefice_reel_pct = round(opp.spread_net_pct - frais_pct, 4)
+        opp.reseau_retrait = info.get("reseau")
+        opp.frais_retrait_estime = bool(info.get("est_estime"))
+    except Exception as e:
+        # Ne doit JAMAIS faire échouer une détection : sans cette info, on
+        # retombe simplement sur l'ancien comportement (seuil sur spread_net_pct)
+        logging.getLogger("arbitrage_engine").warning(
+            f"⚠️ Calcul du bénéfice réel impossible pour {opp.symboles} : {e}"
+        )
+        opp.benefice_reel_pct = None
 
 
 def detecter_arbitrage_triangulaire(exchange: str, triangle: tuple[str, str, str], seuil_pct: float = SEUIL_MIN_TRIANGULAIRE_PCT) -> OpportuniteArbitrage | None:
@@ -817,7 +866,20 @@ async def _traiter_opportunites_symbole(symbol: str, log):
         _dernieres_valeurs_opportunites[cle] = valeur_actuelle
 
         # Alerte réelle uniquement si ça dépasse le vrai seuil ET le quota de débit
-        if opp.spread_net_pct >= seuil_inter_actif:
+        # Condition d'alerte.
+        # Mode "bénéfice réel" (par défaut) : on compare le bénéfice
+        # RÉELLEMENT attendu — frais de retrait de CETTE paire d'exchanges
+        # inclus — à ton objectif. C'est exact pour chaque paire, là où un
+        # seuil unique en % ne peut pas l'être (les frais de retrait étant
+        # fixes en dollars, leur poids en % varie d'une paire à l'autre).
+        # Repli automatique sur l'ancien comportement si le calcul du
+        # bénéfice réel a échoué (benefice_reel_pct is None).
+        if SEUIL_BENEFICE_REEL_ACTIF and opp.benefice_reel_pct is not None:
+            franchit_le_seuil = opp.benefice_reel_pct >= SEUIL_BENEFICE_REEL_PCT
+        else:
+            franchit_le_seuil = opp.spread_net_pct >= seuil_inter_actif
+
+        if franchit_le_seuil:
             # Score ML (probabilité que l'opportunité tienne 5s) — None si le
             # modèle n'est pas encore entraîné/chargé, aucun impact dans ce cas
             opp.score_ml = filtre_ml.score_opportunite(opp)

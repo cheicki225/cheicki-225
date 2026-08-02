@@ -73,6 +73,10 @@ def _normaliser(nom) -> str:
 # {exchange: {RESEAU: {"frais", "min_retrait", "retrait_ouvert", "depot_ouvert"}}}
 _reseaux: dict[str, dict[str, dict]] = {}
 
+# Cache des résultats de frais_transfert(), vidé à chaque rafraîchissement
+# de _reseaux — voir la docstring de frais_transfert().
+_cache_frais: dict[tuple, dict] = {}
+
 
 def _session() -> aiohttp.ClientSession:
     if platform.system() == "Windows":
@@ -183,6 +187,10 @@ async def _rafraichir_une_fois():
             else:
                 log.warning(f"frais_retrait : {exchange} — USDT introuvable dans la réponse")
 
+    # Les frais viennent de changer : le cache de frais_transfert() devient
+    # potentiellement périmé, on le vide (il se reconstruira à la demande).
+    _cache_frais.clear()
+
     log.info(f"frais_retrait : {len(_reseaux)}/6 plateformes couvertes (les autres seront estimées)")
 
 
@@ -196,6 +204,27 @@ async def boucle_rafraichissement(intervalle_sec: float = 6 * 3600):
 
 
 def frais_transfert(ex_source: str, ex_dest: str, montant_usdt: float = 0.0) -> dict:
+    """
+    Coût réel d'un transfert d'USDT de ex_source vers ex_dest.
+
+    Résultat mis en cache : depuis le 02/08, cette fonction est appelée dans
+    la boucle de DÉTECTION (à chaque tick de prix, pour chaque permutation
+    d'exchanges), soit potentiellement des milliers de fois par seconde. Le
+    calcul lui-même est léger, mais inutile de le refaire quand rien n'a
+    changé. Le cache est vidé à chaque rafraîchissement des réseaux (toutes
+    les 6h), donc il ne peut jamais servir de données périmées.
+    """
+    cle = (ex_source, ex_dest, montant_usdt)
+    en_cache = _cache_frais.get(cle)
+    if en_cache is not None:
+        return en_cache
+
+    resultat = _calculer_frais_transfert(ex_source, ex_dest, montant_usdt)
+    _cache_frais[cle] = resultat
+    return resultat
+
+
+def _calculer_frais_transfert(ex_source: str, ex_dest: str, montant_usdt: float = 0.0) -> dict:
     """
     Coût réel d'un transfert d'USDT de ex_source vers ex_dest.
 

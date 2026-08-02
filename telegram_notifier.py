@@ -207,9 +207,25 @@ def _formater_message(opp) -> str:
         f"{emoji} <b>Opportunité {opp.type_arbitrage}</b>",
         f"<code>{opp.description}</code>",
         f"Spread brut : {opp.spread_brut_pct:.3f}%",
-        f"Frais totaux : {opp.frais_total_pct:.3f}%",
-        f"<b>Spread NET : {opp.spread_net_pct:.3f}%</b>",
+        f"Frais trading : {opp.frais_total_pct:.3f}%",
+        f"Spread NET : {opp.spread_net_pct:.3f}%",
     ]
+
+    # Bénéfice RÉEL = spread net MOINS les frais de retrait nécessaires pour
+    # rapatrier les fonds. C'est le chiffre qui décide de l'alerte, donc
+    # celui qui doit être mis en avant — le "spread NET" au-dessus ne compte
+    # que les frais de trading et a longtemps donné une illusion de gain.
+    benefice = getattr(opp, "benefice_reel_pct", None)
+    if benefice is not None:
+        frais_ret = getattr(opp, "frais_retrait_pct", None)
+        reseau = getattr(opp, "reseau_retrait", None)
+        estime = getattr(opp, "frais_retrait_estime", False)
+        marque = " (estimé)" if estime else (f" via {reseau}" if reseau else "")
+        if frais_ret is not None:
+            lignes.append(f"Frais retrait : {frais_ret:.3f}%{marque}")
+        emoji_benefice = "🟢" if benefice > 0 else "🔴"
+        lignes.append(f"{emoji_benefice} <b>BÉNÉFICE RÉEL : {benefice:+.3f}%</b>")
+
     score = getattr(opp, "score_ml", None)
     if score is not None:
         emoji_score = "🟢" if score >= 0.5 else "🟡" if score >= 0.2 else "🔴"

@@ -11,11 +11,65 @@ dans 5 fichiers différents pour ajuster le comportement du bot.
 # ============================================================
 # SEUILS D'ARBITRAGE (spread net, après frais)
 # ============================================================
-SEUIL_MIN_INTER_EXCHANGE_PCT = 2.3   # % net minimum pour déclencher une alerte Telegram (monté de 1.5% à 2.3% le 02/08 — 1.5% était sous le point mort réel une fois frais de retrait inclus)
+SEUIL_MIN_INTER_EXCHANGE_PCT = 3.5
+# ⚠️ Ce seuil ne décide PLUS des alertes tant que SEUIL_BENEFICE_REEL_ACTIF
+# vaut True (voir plus bas) — c'est SEUIL_BENEFICE_REEL_PCT qui gouverne.
+# Il ne sert plus que dans trois cas :
+#   1. REPLI si le calcul du bénéfice réel échoue (exception inattendue)
+#   2. seuil d'affichage du panneau « Cryptos suivies » de la webapp
+#   3. valeur initiale du seuil modifiable depuis le menu Telegram
+#
+# Réglé à 3.5% (et non 2.3%) car c'est le point mort réel sur un trade de
+# 50$ avec des frais de retrait estimés à 1$ : 1.5% d'objectif + 2% de
+# frais de retrait. En cas de repli, mieux vaut rater des opportunités que
+# d'alerter sur des trades qu'on sait perdants.
+# Historique : 0.5% -> 1.5% (31/07) -> 2.3% (02/08) -> 3.5% (02/08, repli)
 SEUIL_MIN_TRIANGULAIRE_PCT = 1.5     # idem pour le triangulaire (était 0.4%)
 
 # Seuil bas séparé pour la COLLECTE DE DONNÉES ML (pas d'alerte, juste logging)
 SEUIL_MIN_COLLECTE_ML_PCT = 0.05
+
+
+# ============================================================
+# SEUIL SUR LE BÉNÉFICE RÉEL (frais de retrait inclus)
+# ============================================================
+# PROBLÈME que ça résout :
+# SEUIL_MIN_INTER_EXCHANGE_PCT porte sur le spread NET au sens "après frais
+# de TRADING seulement". Les frais de RETRAIT (nécessaires pour rapatrier
+# les fonds et boucler l'arbitrage) n'y sont pas comptés. Résultat : une
+# alerte à 1.55% pouvait correspondre à une perte réelle de -0.45%.
+#
+# Ces frais sont FIXES en dollars, donc leur poids en % dépend entièrement du
+# montant tradé — 1$ de retrait vaut 2% sur un trade de 50$, mais 0.2% sur
+# 500$. Un seuil unique en % ne peut donc PAS être correct pour toutes les
+# paires d'exchanges à la fois : trop haut pour celles à frais faibles, trop
+# bas pour celles à frais élevés.
+#
+# SOLUTION : quand SEUIL_BENEFICE_REEL_ACTIF = True, le bot calcule à la
+# détection le bénéfice RÉELLEMENT attendu (frais de trading + frais de
+# retrait réels de cette paire précise) et le compare directement à
+# SEUIL_BENEFICE_REEL_PCT. Tu règles ton objectif de bénéfice, le bot fait
+# l'arithmétique exacte pour chaque paire.
+SEUIL_BENEFICE_REEL_ACTIF = True
+
+# Bénéfice minimum RÉELLEMENT attendu, en %, pour déclencher une alerte.
+# ⚠️ Ce n'est PAS un bénéfice garanti : le slippage, le second transfert
+# (retour du token) et le délai réel d'exécution ne sont toujours PAS
+# modélisés. C'est le meilleur cas, pas le cas probable.
+SEUIL_BENEFICE_REEL_PCT = 1.5
+
+# Montant de référence par trade, en USDT. Sert au mode papier ET au calcul
+# du bénéfice réel ci-dessus (les frais de retrait étant fixes en dollars,
+# ce montant change complètement le résultat).
+#
+# ⚠️ LEVIER LE PLUS EFFICACE du bot : augmenter ce montant dilue les frais
+# fixes bien plus efficacement que monter le seuil. Pour viser +1.5% réel :
+#     50$/trade  -> il faut un spread brut-frais_trading d'environ 3.5%
+#    200$/trade  -> environ 2.0% suffit
+#    500$/trade  -> environ 1.7% suffit
+# (avec des frais de retrait estimés à 1$ ; c'est moins avec les vrais frais
+#  KuCoin/Bitget/Gate.io, qui sont les seuls réellement connus.)
+MONTANT_PAR_TRADE_USDT = 50.0
 
 
 # ============================================================

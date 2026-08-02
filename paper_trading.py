@@ -44,7 +44,7 @@ from config import (
     CAPITAL_PAR_EXCHANGE_PAPIER,
     SEUIL_REEQUILIBRAGE_PCT, FRAIS_TRANSFERT_SIMULE_USDT, RESEAU_PREFERE, RESEAU_FALLBACK,
     MAX_TOKENS_EN_STOCK, VALEUR_STOCK_PAR_TOKEN_USDT, SUIVI_STOCKS_ACTIF,
-    FRAIS_TRADING_PCT,
+    FRAIS_TRADING_PCT, MONTANT_PAR_TRADE_USDT,
 )
 
 log = logging.getLogger("paper_trading")
@@ -57,7 +57,11 @@ COLONNES = [
     "liquidite_suffisante", "double_verification_ok", "profit_usdt", "frais_usdt",
 ]
 
-MONTANT_PAR_TRADE_USDT = 50.0
+# MONTANT_PAR_TRADE_USDT est maintenant défini dans config.py (importé
+# ci-dessus) — il sert aussi au calcul du seuil de bénéfice réel dans
+# bot_fusionne_v1, donc les deux doivent impérativement être la même valeur.
+# Reste accessible en `paper_trading.MONTANT_PAR_TRADE_USDT` : plusieurs
+# fichiers y font référence sous ce nom (bot_fusionne_v1, api_server).
 
 # Aucun minimum — n'importe quel montant réellement exécutable (même faible)
 # déclenche un trade papier, à prix toujours honnête. Seul un carnet
@@ -705,7 +709,16 @@ def stats_papier():
     _reset_jour_si_necessaire()
     e = _etat_papier
     capital_actuel = e["capital_initial"] + e["profit_cumule_usdt"]
-    nb_executes = e["nb_trades_total"] - e["nb_trades_rejetes_liquidite"]
+    # Un trade rejeté n'a JAMAIS été exécuté : il ne doit pas compter au
+    # dénominateur du taux de réussite. Les rejets pour liquidité étaient
+    # bien soustraits, mais PAS ceux pour stock insuffisant (ajoutés plus
+    # tard) — chacun faisait donc baisser le taux affiché comme s'il
+    # s'agissait d'un trade perdant, alors qu'il n'a rien tenté du tout.
+    nb_executes = (
+        e["nb_trades_total"]
+        - e["nb_trades_rejetes_liquidite"]
+        - e.get("nb_trades_rejetes_stock", 0)
+    )
     taux_reussite = (e["nb_trades_reussis"] / nb_executes * 100) if nb_executes > 0 else 0
 
     statut_cb = "🚨 ACTIF (trades papier suspendus)" if _circuit_breaker_actif else "🟢 OK"

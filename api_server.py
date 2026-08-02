@@ -106,12 +106,23 @@ async def handler_papier(request):
 
     import paper_trading
     e = paper_trading._etat_papier
+    # Trades RÉELLEMENT exécutés = tentés moins tous les rejets. Un rejet
+    # (liquidité nulle ou stock manquant) n'a jamais rien tenté : le compter
+    # au dénominateur du taux de réussite le fait baisser mécaniquement,
+    # comme s'il s'agissait d'un trade perdant.
+    nb_executes = (
+        e["nb_trades_total"]
+        - e["nb_trades_rejetes_liquidite"]
+        - e.get("nb_trades_rejetes_stock", 0)
+    )
     return _reponse_json({
         "capital_initial": e["capital_initial"],
         "profit_cumule": round(e["profit_cumule_usdt"], 3),
         "nb_trades_total": e["nb_trades_total"],
+        "nb_trades_executes": nb_executes,
         "nb_trades_reussis": e["nb_trades_reussis"],
         "nb_trades_rejetes_liquidite": e["nb_trades_rejetes_liquidite"],
+        "nb_trades_rejetes_stock": e.get("nb_trades_rejetes_stock", 0),
         "nb_cryptos_eliminees": e["nb_cryptos_eliminees"],
         "circuit_breaker_actif": paper_trading.circuit_breaker_actif(),
         "stop_loss_actif": paper_trading.stop_loss_journalier_actif(),

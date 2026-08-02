@@ -297,8 +297,100 @@ asyncio.run(test_logger())
 
 
 # ============================================================
-# Nettoyage + bilan
+print("\n[10] Seuil sur le bénéfice réel (frais de retrait inclus)")
 # ============================================================
+import frais_retrait as fr
+
+# Faux réseaux : bitget bon marché (0.10$), gateio cher (2.00$)
+fr._reseaux.clear()
+fr._cache_frais.clear()
+for exchange, cout in (("bitget", 0.10), ("gateio", 2.00), ("binance", 0.10), ("kucoin", 0.10)):
+    fr._reseaux[exchange] = {
+        "SOL": {"frais": cout, "retrait_ouvert": True, "depot_ouvert": True, "min_retrait": 1}
+    }
+
+
+def detecter(ex_achat, ex_vente, spread_brut_pct):
+    bot.prix_live.clear()
+    prix_achat = 1.0
+    prix_vente = prix_achat * (1 + spread_brut_pct / 100)
+    bot.prix_live[ex_achat] = {"XUSDT": {"bid": 0, "ask": prix_achat, "timestamp": time.time()}}
+    bot.prix_live[ex_vente] = {"XUSDT": {"bid": prix_vente, "ask": 999999, "timestamp": time.time()}}
+    trouvees = [
+        o for o in bot.detecter_arbitrage_inter_exchange("XUSDT", seuil_pct=0.05)
+        if o.exchanges == [ex_achat, ex_vente]
+    ]
+    return trouvees[0] if trouvees else None
+
+
+pas_cher = detecter("binance", "bitget", 2.0)
+cher = detecter("binance", "gateio", 2.0)
+
+verifier(
+    pas_cher.benefice_reel_pct is not None and cher.benefice_reel_pct is not None,
+    "le bénéfice réel est calculé à la détection",
+)
+verifier(
+    pas_cher.benefice_reel_pct > config.SEUIL_BENEFICE_REEL_PCT > cher.benefice_reel_pct,
+    f"même spread brut 2.0% → paire bon marché {pas_cher.benefice_reel_pct:+.2f}% (alerte) "
+    f"vs paire chère {cher.benefice_reel_pct:+.2f}% (ignorée)",
+)
+verifier(
+    pas_cher.reseau_retrait == "SOL" and not pas_cher.frais_retrait_estime,
+    "réseau de retrait identifié et marqué comme non estimé",
+)
+
+# spread_net_pct ne doit PAS avoir changé de sens (pipeline ML intact)
+a = detecter("binance", "bitget", 2.0)
+b = detecter("binance", "kucoin", 2.0)
+verifier(
+    a.spread_net_pct == b.spread_net_pct and abs(a.spread_net_pct - 1.8) < 1e-9,
+    f"spread_net_pct inchangé (frais trading seuls) = {a.spread_net_pct:.4f}% → pipeline ML intact",
+)
+
+# Repli si le calcul échoue
+a.benefice_reel_pct = None
+utilise_repli = not (config.SEUIL_BENEFICE_REEL_ACTIF and a.benefice_reel_pct is not None)
+verifier(utilise_repli, "repli sur l'ancien seuil si le bénéfice réel est indisponible")
+
+# Effet du montant par trade
+montants = {}
+for montant in (50, 500):
+    bot.MONTANT_PAR_TRADE_USDT = montant
+    o = detecter("binance", "gateio", 2.5)
+    montants[montant] = o.benefice_reel_pct
+bot.MONTANT_PAR_TRADE_USDT = config.MONTANT_PAR_TRADE_USDT
+verifier(
+    montants[500] > montants[50],
+    f"augmenter le montant dilue les frais fixes : 50$ → {montants[50]:+.2f}% "
+    f"vs 500$ → {montants[500]:+.2f}%",
+)
+
+# Cache des frais
+fr._cache_frais.clear()
+r1 = fr.frais_transfert("gateio", "bitget", 50.0)
+r2 = fr.frais_transfert("gateio", "bitget", 50.0)
+verifier(r1 is r2, "frais_transfert met bien son résultat en cache (appelé à chaque tick)")
+
+
+# ============================================================
+print("\n[11] Rendu de l'alerte Telegram")
+# ============================================================
+opp_affichage = detecter("binance", "bitget", 2.0)
+opp_affichage.type_arbitrage = "inter_exchange"
+opp_affichage.description = "Acheter XUSDT sur binance @ 1.0 -> Vendre sur bitget @ 1.02"
+opp_affichage.score_ml = 0.06
+opp_affichage.liquidite_info = None
+message = tn._formater_message(opp_affichage)
+print("  ---")
+for ligne in message.split("\n"):
+    print("   ", ligne)
+print("  ---")
+verifier("BÉNÉFICE RÉEL" in message, "le bénéfice réel apparaît dans l'alerte")
+verifier("Frais retrait" in message, "les frais de retrait sont détaillés")
+
+
+
 for chemin in (CSV_SUIVI, opportunity_logger.CSV_PATH):
     if os.path.exists(chemin):
         os.remove(chemin)
