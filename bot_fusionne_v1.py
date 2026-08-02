@@ -25,6 +25,7 @@ import symbol_discovery
 import health_manager
 import paper_trading
 import api_server
+import suivi_opportunite
 
 logging.basicConfig(
     level=logging.INFO,
@@ -810,6 +811,12 @@ async def _traiter_opportunites_symbole(symbol: str, log):
                 # bot aurait vraiment gagné/perdu, profondeur réelle incluse)
                 frais_total = FRAIS_TRADING_PCT.get(opp.exchanges[0], 0.10) + FRAIS_TRADING_PCT.get(opp.exchanges[1], 0.10)
                 asyncio.create_task(paper_trading.simuler_trade(opp, frais_total))
+
+                # Suivi de persistance : relit le prix chaque seconde pendant 10s
+                # (depuis le cache WebSocket, sans appel réseau) pour savoir si le
+                # spread affiché ici tient réellement dans le temps ou s'effondre
+                # avant qu'un vrai transfert entre plateformes ait pu se boucler
+                asyncio.create_task(suivi_opportunite.suivre_opportunite(opp, prix_live))
             elif bloque_par_ml:
                 log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:
