@@ -12,11 +12,21 @@ Fonctionnalités de gestion du risque :
    toutes cryptos confondues (signal d'un problème plus large)
 3. Stop-loss journalier : coupe les trades papier si le profit du jour
    devient trop négatif, reset automatique le lendemain
-4. Double vérification : un trade n'est compté "réussi" que si 2 contrôles
-   de profondeur rapprochés confirment TOUS LES DEUX la rentabilité
+4. Contrôle de rentabilité : un trade n'est compté "réussi" que si le profit
+   net est positif APRÈS tous les frais (trading + retrait réel)
 5. Score de confiance par crypto : classement du taux de réussite réel
 
 ⚠️ Aucune clé API n'est utilisée ici — carnets d'ordres publics uniquement.
+
+⚠️ NOTE DE NOMMAGE (corrigé le 02/08) : le code parle de "double
+vérification" un peu partout (`double_verif_ok`, colonne CSV
+`double_verification_ok`, compteur `nb_trades_rejetes_double_verif`,
+"Rejetés (double vérif)" dans le dashboard). C'est un vestige : il n'y a
+plus qu'UN SEUL contrôle de profondeur, et `double_verif_ok` vaut
+simplement `profit_net_usdt > 0`, c'est-à-dire "le trade est rentable".
+Ces noms sont conservés VOLONTAIREMENT car les renommer casserait
+index.html (qui lit `double_verification_ok`) et rendrait illisible tout
+l'historique CSV déjà accumulé. Lis-les comme "trade rentable".
 """
 
 import asyncio
@@ -31,7 +41,7 @@ import health_manager
 import stockage
 from config import (
     CIRCUIT_BREAKER_PERTES_CONSECUTIVES, CIRCUIT_BREAKER_ACTIVE, STOP_LOSS_JOURNALIER_USDT,
-    DOUBLE_VERIFICATION_DELAI_SEC, CAPITAL_PAR_EXCHANGE_PAPIER,
+    CAPITAL_PAR_EXCHANGE_PAPIER,
     SEUIL_REEQUILIBRAGE_PCT, FRAIS_TRANSFERT_SIMULE_USDT, RESEAU_PREFERE, RESEAU_FALLBACK,
     MAX_TOKENS_EN_STOCK, VALEUR_STOCK_PAR_TOKEN_USDT, SUIVI_STOCKS_ACTIF,
     FRAIS_TRADING_PCT,
@@ -470,15 +480,21 @@ def historique_transferts(limite=10):
     return "\n".join(texte)
 
 
-async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USDT):
+async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USDT, notifier: bool = True):
     """
     Simule l'exécution d'une opportunité d'arbitrage inter-exchange, avec
     gestion complète du risque :
     1. Bloque si le circuit breaker global ou le stop-loss journalier est actif
-    2. Double vérification de profondeur (2 contrôles rapprochés)
-    3. Calcule le profit réaliste après slippage ET frais
+    2. Contrôle de profondeur de carnet réel
+    3. Calcule le profit réaliste après slippage ET frais (trading + retrait)
     4. Met à jour circuit breaker, stop-loss et score de confiance
     5. Élimine la crypto après 5 échecs consécutifs
+
+    notifier : False = la simulation tourne normalement et le CSV est rempli,
+        mais aucun message Telegram n'est envoyé (mode nuit). La collecte de
+        données ne doit JAMAIS s'arrêter juste parce que les notifications
+        sont coupées — c'est précisément la nuit qu'on veut continuer à
+        mesurer sans être réveillé.
     """
     _init_csv()
 
@@ -621,6 +637,12 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     )
 
     try:
+        if not notifier:
+            # Mode nuit : tout ce qui précède (CSV, stats, circuit breaker,
+            # stocks, soldes, score par crypto) a bien été fait — seule la
+            # notification saute. La collecte de données continue la nuit.
+            return {"execute": True, "profit_usdt": profit_net_usdt, "spread_reel_pct": spread_reel_pct, "succes": succes}
+
         import telegram_notifier
         emoji = "✅" if succes else "❌"
         base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol

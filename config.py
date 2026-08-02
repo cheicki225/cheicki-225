@@ -11,7 +11,7 @@ dans 5 fichiers différents pour ajuster le comportement du bot.
 # ============================================================
 # SEUILS D'ARBITRAGE (spread net, après frais)
 # ============================================================
-SEUIL_MIN_INTER_EXCHANGE_PCT = 1.5   # % net minimum pour déclencher une alerte Telegram (monté de 0.5% à 1.5% le 31/07)
+SEUIL_MIN_INTER_EXCHANGE_PCT = 2.3   # % net minimum pour déclencher une alerte Telegram (monté de 1.5% à 2.3% le 02/08 — 1.5% était sous le point mort réel une fois frais de retrait inclus)
 SEUIL_MIN_TRIANGULAIRE_PCT = 1.5     # idem pour le triangulaire (était 0.4%)
 
 # Seuil bas séparé pour la COLLECTE DE DONNÉES ML (pas d'alerte, juste logging)
@@ -98,22 +98,60 @@ RESEAU_FALLBACK = "TRC20"
 # Maximum de cryptos DIFFÉRENTES alertées par minute glissante — évite
 # qu'une seule paire instable (ex: un altcoin peu liquide qui oscille)
 # ne monopolise le flux d'alertes Telegram.
-# ⚠️ Chaque alerte génère AUSSI un message de trade papier : le nombre réel
-# de messages Telegram est donc le double de cette valeur. Telegram bloque
-# au-delà d'environ 20 messages/minute vers un même chat (blocage de
-# plusieurs heures constaté le 01/08 avec l'ancienne valeur de 30).
-# 8 alertes/minute = ~16 messages/minute, sous la limite avec de la marge.
-MAX_ALERTES_PAR_MINUTE = 8
+#
+# ⚠️ CALCUL DE CHARGE TELEGRAM — à recalculer à CHAQUE nouveau type de message.
+# Telegram bloque au-delà d'environ 20 messages/minute vers un même chat
+# (blocage de 2h45 constaté le 01/08 avec l'ancienne valeur de 30).
+#
+# Messages envoyés par opportunité alertée :
+#   1. l'alerte d'opportunité elle-même   (bot_fusionne_v1 -> envoyer_alerte)
+#   2. le résultat du trade papier         (paper_trading.simuler_trade)
+#   3. le résumé du suivi 10s              (suivi_opportunite) [ajouté le 02/08]
+#
+# 6 alertes/minute x 3 messages = 18 messages/minute, sous la limite de 20.
+# (Avec l'ancienne valeur de 8 : 8 x 3 = 24/minute, AU-DESSUS de la limite —
+#  d'où la baisse à 6 en même temps que l'ajout du suivi 10s.)
+# En pratique c'est encore moins, car le résumé de suivi n'est envoyé que
+# s'il est informatif (voir SUIVI_ENVOYER_SEULEMENT_SI_POSITIF ci-dessous).
+MAX_ALERTES_PAR_MINUTE = 6
 
 # Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
 # la combinaison d'exchanges — évite qu'une crypto volatile ne déclenche
-# des dizaines d'alertes/trades papier en quelques secondes
+# des dizaines d'alertes/trades papier en quelques secondes, et qu'elle ne
+# re-déclenche en boucle à chaque petit mouvement de prix.
+# (Était défini DEUX FOIS dans ce fichier avec deux commentaires différents —
+#  sans effet tant que les valeurs étaient identiques, mais piège garanti le
+#  jour où on en modifie une seule. Fusionné le 02/08.)
 COOLDOWN_PAR_CRYPTO_SEC = 15
 
-# Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
-# la combinaison d'exchanges — évite qu'une crypto volatile ne re-déclenche
-# en boucle à chaque petit mouvement de prix
-COOLDOWN_PAR_CRYPTO_SEC = 15
+
+# ============================================================
+# SUIVI DE PERSISTANCE 10s (suivi_opportunite.py)
+# ============================================================
+# Après chaque alerte, le bot relit le prix chaque seconde pendant 10s dans
+# le cache WebSocket (aucun appel réseau) et recalcule le spread NET RÉEL,
+# frais de retrait inclus — ce que le seuil d'alerte ne fait PAS.
+# C'est la mesure directe de "est-ce que ce spread tient assez longtemps",
+# là où le score ML n'est qu'une probabilité apprise.
+SUIVI_ACTIF = True
+
+# Durée du suivi et intervalle entre deux lectures (secondes)
+SUIVI_DUREE_SEC = 10
+SUIVI_INTERVALLE_SEC = 1.0
+
+# Un prix plus vieux que ça n'est plus "observé maintenant" — c'est un flux
+# WebSocket muet ou coupé. Affiché « ? » plutôt que réutilisé comme s'il
+# était frais (un prix figé donnerait un faux spread stable).
+SUIVI_AGE_MAX_PRIX_SEC = 5.0
+
+# True  = n'envoie le résumé Telegram QUE si le spread réel a été positif au
+#         moins une seconde pendant la fenêtre. Les cas « négatif du début à
+#         la fin » sont toujours écrits dans le CSV, mais pas notifiés —
+#         ils sont majoritaires et tous identiques, donc ils saturent
+#         Telegram sans rien t'apprendre de nouveau.
+# False = envoie tout (utile quelques heures pour observer, puis à remettre
+#         à True — attention au quota Telegram calculé plus haut).
+SUIVI_ENVOYER_SEULEMENT_SI_POSITIF = True
 
 
 # ============================================================
@@ -134,9 +172,19 @@ CIRCUIT_BREAKER_PERTES_CONSECUTIVES = 10
 # lendemain (reset automatique à minuit)
 STOP_LOSS_JOURNALIER_USDT = -20.0
 
-# Double vérification : délai entre les 2 contrôles de profondeur avant de
-# valider un trade papier comme "réussi" — les deux doivent être rentables
-DOUBLE_VERIFICATION_DELAI_SEC = 0.5
+# ⚠️ OBSOLÈTE (02/08) — la "double vérification" n'existe plus dans le code.
+# simuler_trade() ne fait plus qu'UN seul contrôle de profondeur ("Contrôle
+# instantané unique"), et la variable `double_verif_ok` vaut désormais
+# simplement `profit_net_usdt > 0`, c'est-à-dire "le trade est rentable" —
+# pas "deux contrôles concordent".
+# Cette constante n'était plus lue par aucun fichier (elle était seulement
+# importée dans paper_trading.py sans jamais servir). Gardée ici, à zéro,
+# uniquement pour ne pas casser un éventuel import oublié ailleurs.
+# Les noms `double_verification_ok` (colonne CSV) et "Rejetés (double vérif)"
+# (dashboard) sont conservés VOLONTAIREMENT : les renommer casserait
+# index.html (ligne ~1140) et rendrait illisible tout l'historique CSV déjà
+# accumulé. Retiens simplement que ça veut dire "trade rentable".
+DOUBLE_VERIFICATION_DELAI_SEC = 0.0
 
 # ============================================================
 # FILTRE ML (modèle entraîné sur opportunites_log.csv)

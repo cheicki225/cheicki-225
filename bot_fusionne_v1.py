@@ -461,6 +461,7 @@ from config import (
     SEUIL_CHUTE_PAIRES_ALERTE_PCT, COOLDOWN_ALERTE_CHUTE_SEC,
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
+    SUIVI_ACTIF,
 )
 import filtre_ml
 import spreads_live
@@ -697,7 +698,56 @@ def _peut_alerter(symbol: str) -> bool:
     # Réserve immédiatement (avant tout await ailleurs) pour éviter la course
     _dernier_alerte_par_symbole[symbol] = maintenant
     _fenetre_alertes.append((maintenant, symbol))
+
+    _purger_etats_periodiquement(maintenant)
     return True
+
+
+# ============================================================
+# PURGE MÉMOIRE
+# ============================================================
+# _dernieres_valeurs_opportunites est indexé par (type + exchanges + symbole) :
+# avec 300+ paires et toutes les permutations d'exchanges, ça fait des milliers
+# de clés qui n'étaient JAMAIS supprimées. Sur un service qui tourne des
+# semaines sans redémarrage (Railway), la mémoire ne fait que monter.
+# _dernier_alerte_par_symbole a le même souci, en plus lent.
+_dernier_purge_etats = 0.0
+_INTERVALLE_PURGE_SEC = 600  # toutes les 10 minutes
+_AGE_MAX_VALEUR_OPPORTUNITE_SEC = 3600  # une valeur vieille d'1h ne sert plus à dédupliquer
+
+
+def _purger_etats_periodiquement(maintenant: float):
+    """Supprime les entrées trop vieilles pour encore servir. Sans await."""
+    global _dernier_purge_etats
+    if maintenant - _dernier_purge_etats < _INTERVALLE_PURGE_SEC:
+        return
+    _dernier_purge_etats = maintenant
+
+    avant_valeurs = len(_dernieres_valeurs_opportunites)
+    avant_symboles = len(_dernier_alerte_par_symbole)
+
+    # Cooldown par symbole : une entrée plus vieille que le cooldown
+    # n'empêchera plus jamais rien, elle peut partir.
+    for sym in [
+        s for s, t in _dernier_alerte_par_symbole.items()
+        if maintenant - t > COOLDOWN_PAR_CRYPTO_SEC * 10
+    ]:
+        del _dernier_alerte_par_symbole[sym]
+
+    # Déduplication des valeurs : on ne stocke pas d'horodatage ici (juste la
+    # dernière valeur vue), donc pas de purge par âge possible sans changer la
+    # structure. On borne simplement la taille : au-delà, on vide entièrement.
+    # Conséquence : au pire, chaque opportunité est reloguée UNE fois de plus
+    # après une purge — sans aucun impact sur les alertes, qui sont protégées
+    # par _peut_alerter et par l'anti-spam de telegram_notifier.
+    if len(_dernieres_valeurs_opportunites) > 50_000:
+        _dernieres_valeurs_opportunites.clear()
+
+    if avant_valeurs != len(_dernieres_valeurs_opportunites) or avant_symboles != len(_dernier_alerte_par_symbole):
+        logging.getLogger("arbitrage_engine").info(
+            f"🧹 Purge mémoire : valeurs {avant_valeurs}→{len(_dernieres_valeurs_opportunites)}, "
+            f"symboles {avant_symboles}→{len(_dernier_alerte_par_symbole)}"
+        )
 
 
 _symboles_en_cours = set()  # évite l'accumulation de tâches sur un symbole très volatil
@@ -780,20 +830,23 @@ async def _traiter_opportunites_symbole(symbol: str, log):
                 FILTRAGE_ML_ACTIF and opp.score_ml is not None and opp.score_ml < SEUIL_ML_CONFIANCE_MIN
             )
 
+            # Le mode nuit ne doit couper QUE les notifications Telegram, pas
+            # le traitement lui-même : sa documentation dit explicitement « le
+            # scan continue ». Avant, il était inclus dans `autorise` et
+            # arrêtait donc AUSSI le trade papier, la vérif de liquidité et la
+            # collecte de données — soit toute la mesure, silencieusement.
+            mode_nuit = telegram_menu_bot.etat_bot.mode_nuit
+
             # Un seul appel à _peut_alerter (il réserve le créneau) — réutilisé
             # pour LE LOG, l'alerte Telegram ET le trade papier, pour que tout
             # respecte la même limite d'une fois par crypto par minute
-            autorise = (
-                (not telegram_menu_bot.etat_bot.mode_nuit)
-                and _peut_alerter(opp.symboles[0])
-                and not bloque_par_ml
-            )
+            autorise = _peut_alerter(opp.symboles[0]) and not bloque_par_ml
 
             if autorise:
                 # Vraie profondeur de carnet, pour l'afficher DANS l'alerte —
                 # vérification indépendante de celle refaite juste après par
-                # simuler_trade() (double vérification volontaire, pas un doublon
-                # inutile : le carnet peut bouger entre les deux, à quelques ms d'écart)
+                # simuler_trade() (volontaire, pas un doublon inutile : le
+                # carnet peut bouger entre les deux, à quelques ms d'écart)
                 try:
                     opp.liquidite_info = await orderbook_depth.estimer_execution_reelle(
                         opp.exchanges[0], opp.exchanges[1], opp.symboles[0], paper_trading.MONTANT_PAR_TRADE_USDT
@@ -804,19 +857,38 @@ async def _traiter_opportunites_symbole(symbol: str, log):
 
                 score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
                 log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
-                await envoyer_alerte(opp)  # anti-spam intégré, cooldown 60s par opportunité
+
+                # message_id de l'alerte réellement envoyée, ou None.
+                # envoyer_alerte() peut ne RIEN envoyer (cooldown 60s sur cette
+                # combinaison, ou blocage 429 en cours) : sa valeur de retour
+                # était ignorée, d'où des messages de suivi orphelins publiés
+                # sans alerte correspondante visible dans le fil.
+                message_id_alerte = None
+                if not mode_nuit:
+                    message_id_alerte = await envoyer_alerte(opp)
 
                 # Mode papier : simule l'exécution en arrière-plan (aucun
                 # argent réel, juste pour mesurer objectivement ce que le
-                # bot aurait vraiment gagné/perdu, profondeur réelle incluse)
+                # bot aurait vraiment gagné/perdu, profondeur réelle incluse).
+                # Tourne MÊME en mode nuit — seule sa notification est coupée.
                 frais_total = FRAIS_TRADING_PCT.get(opp.exchanges[0], 0.10) + FRAIS_TRADING_PCT.get(opp.exchanges[1], 0.10)
-                asyncio.create_task(paper_trading.simuler_trade(opp, frais_total))
+                asyncio.create_task(paper_trading.simuler_trade(
+                    opp, frais_total, notifier=not mode_nuit
+                ))
 
-                # Suivi de persistance : relit le prix chaque seconde pendant 10s
-                # (depuis le cache WebSocket, sans appel réseau) pour savoir si le
-                # spread affiché ici tient réellement dans le temps ou s'effondre
-                # avant qu'un vrai transfert entre plateformes ait pu se boucler
-                asyncio.create_task(suivi_opportunite.suivre_opportunite(opp, prix_live))
+                # Suivi de persistance : relit le prix chaque seconde pendant
+                # SUIVI_DUREE_SEC (depuis le cache WebSocket, sans appel réseau)
+                # pour savoir si le spread affiché ici tient réellement dans le
+                # temps ou s'effondre avant qu'un transfert ait pu se boucler.
+                # Le CSV est rempli dans tous les cas ; le résumé Telegram n'est
+                # envoyé que si une alerte est réellement partie (sinon il n'y
+                # aurait aucun message auquel le rattacher).
+                if SUIVI_ACTIF:
+                    asyncio.create_task(suivi_opportunite.suivre_opportunite(
+                        opp, prix_live,
+                        message_id_alerte=message_id_alerte,
+                        notifier=bool(message_id_alerte),
+                    ))
             elif bloque_par_ml:
                 log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:
@@ -861,10 +933,15 @@ async def verifier_triangles_exchange(exchange: str):
                 FILTRAGE_ML_ACTIF and opp.score_ml is not None and opp.score_ml < SEUIL_ML_CONFIANCE_MIN
             )
 
-            if not telegram_menu_bot.etat_bot.mode_nuit and _peut_alerter(opp.symboles[0]) and not bloque_par_ml:
+            # Même principe que pour l'inter-exchange : le mode nuit coupe la
+            # notification, pas le traitement ni le log (le scan continue).
+            mode_nuit = telegram_menu_bot.etat_bot.mode_nuit
+
+            if _peut_alerter(opp.symboles[0]) and not bloque_par_ml:
                 score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
                 log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
-                await envoyer_alerte(opp)
+                if not mode_nuit:
+                    await envoyer_alerte(opp)
             elif bloque_par_ml:
                 log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:

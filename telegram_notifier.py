@@ -87,8 +87,19 @@ def etat_limiteur() -> dict:
     }
 
 
-async def _envoyer_payload(payload: dict) -> bool:
-    """Point de passage UNIQUE pour tout envoi Telegram. Retourne True si envoyé."""
+async def _envoyer_payload(payload: dict) -> int | None:
+    """
+    Point de passage UNIQUE pour tout envoi Telegram.
+
+    Retourne le message_id attribué par Telegram si le message est parti,
+    None sinon (limiteur actif, erreur réseau, 429...).
+
+    ⚠️ Retournait auparavant un booléen. Le message_id est nécessaire pour
+    rattacher un message de suivi à l'alerte qu'il analyse
+    (reply_to_message_id). Comme un message_id est toujours un entier > 0,
+    tout code existant qui fait `if envoye:` continue de fonctionner
+    exactement pareil — None et 0 sont faux, un id est vrai.
+    """
     global _dernier_envoi, _bloque_jusqua, _nb_abandonnes, _dernier_log_blocage
 
     maintenant = time.time()
@@ -103,7 +114,7 @@ async def _envoyer_payload(payload: dict) -> bool:
                 f"⏳ Telegram bloqué encore {restant}s ({restant // 60} min) — "
                 f"{_nb_abandonnes} message(s) abandonné(s) depuis le début du blocage"
             )
-        return False
+        return None
 
     async with _verrou_envoi:
         # Espacement minimum entre deux envois
@@ -119,7 +130,15 @@ async def _envoyer_payload(payload: dict) -> bool:
                     _dernier_envoi = time.time()
 
                     if resp.status == 200:
-                        return True
+                        try:
+                            donnees = await resp.json()
+                            return donnees.get("result", {}).get("message_id")
+                        except Exception:
+                            # Message bien parti mais réponse illisible : on ne
+                            # peut pas fournir d'id, sans que ce soit un échec.
+                            # -1 reste "vrai" pour `if envoye:`, tout en étant
+                            # inutilisable comme reply_to (Telegram le refuserait).
+                            return -1
 
                     if resp.status == 429:
                         try:
@@ -135,19 +154,46 @@ async def _envoyer_payload(payload: dict) -> bool:
                             f"{int(retry)}s ({int(retry) // 60} min). Les messages de cette "
                             f"période seront abandonnés, pas mis en file."
                         )
-                        return False
+                        return None
 
                     body = await resp.text()
                     log.error(f"Échec envoi Telegram ({resp.status}) : {body[:200]}")
-                    return False
+                    return None
         except Exception as e:
             _dernier_envoi = time.time()
             log.error(f"Erreur envoi Telegram : {e}")
-            return False
+            return None
 
 
 # Garde en mémoire la dernière fois qu'une opportunité a été notifiée
 _dernieres_notifications: dict[str, float] = {}
+
+# Purge périodique : une clé est du type "inter_exchange:gateio-binance:XYZUSDT".
+# Avec 300+ paires x toutes les permutations d'exchanges, ce dictionnaire
+# grossissait indéfiniment sur un service qui tourne des semaines sans
+# redémarrage (Railway). Les entrées plus vieilles que le cooldown ne
+# servent plus jamais à rien : elles sont supprimées.
+_dernier_purge_notifications = 0.0
+_INTERVALLE_PURGE_SEC = 300  # toutes les 5 minutes, coût négligeable
+
+
+def _purger_notifications(maintenant: float):
+    global _dernier_purge_notifications
+    if maintenant - _dernier_purge_notifications < _INTERVALLE_PURGE_SEC:
+        return
+    _dernier_purge_notifications = maintenant
+
+    perimees = [
+        cle for cle, horodatage in _dernieres_notifications.items()
+        if maintenant - horodatage > COOLDOWN_PAR_OPPORTUNITE_SEC
+    ]
+    for cle in perimees:
+        del _dernieres_notifications[cle]
+    if perimees:
+        log.debug(
+            f"Purge anti-spam : {len(perimees)} entrée(s) périmée(s) retirée(s), "
+            f"{len(_dernieres_notifications)} conservée(s)"
+        )
 
 
 def _cle_opportunite(opp) -> str:
@@ -180,22 +226,31 @@ def _formater_message(opp) -> str:
     return "\n".join(lignes)
 
 
-async def envoyer_alerte(opp, forcer: bool = False) -> bool:
+async def envoyer_alerte(opp, forcer: bool = False) -> int | None:
     """
     Envoie une alerte Telegram pour une opportunité, sauf si elle a déjà
     été notifiée récemment (anti-spam) — sauf si forcer=True.
-    Retourne True si un message a été envoyé.
+
+    Retourne le message_id Telegram si un message a été envoyé, None sinon.
+    (Un id est toujours "vrai" et None est "faux", donc `if envoyer_alerte(...)`
+    se comporte comme avant avec l'ancien booléen.)
+
+    Ce message_id sert à rattacher le résumé du suivi 10s à l'alerte qu'il
+    analyse, et surtout à savoir si l'alerte est VRAIMENT partie : sans ça,
+    un suivi pouvait être publié alors que l'alerte correspondante avait été
+    silencieusement abandonnée (cooldown ou blocage 429) — d'où des messages
+    de suivi orphelins, sans opportunité visible à laquelle les rattacher.
     """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant dans .env — alerte ignorée")
-        return False
+        return None
 
     cle = _cle_opportunite(opp)
     maintenant = time.time()
     derniere_fois = _dernieres_notifications.get(cle, 0)
 
     if not forcer and (maintenant - derniere_fois) < COOLDOWN_PAR_OPPORTUNITE_SEC:
-        return False  # déjà notifié récemment, on ignore pour éviter le spam
+        return None  # déjà notifié récemment, on ignore pour éviter le spam
 
     message = _formater_message(opp)
     payload = {
@@ -204,21 +259,39 @@ async def envoyer_alerte(opp, forcer: bool = False) -> bool:
         "parse_mode": "HTML",
     }
 
-    envoye = await _envoyer_payload(payload)
-    if envoye:
+    message_id = await _envoyer_payload(payload)
+    if message_id:
         _dernieres_notifications[cle] = maintenant
+        _purger_notifications(maintenant)
         log.info(f"Alerte envoyée : {cle}")
-    return envoye
+    return message_id
 
 
-async def envoyer_message_simple(texte: str) -> bool:
-    """Envoie un message texte simple (ex: démarrage du bot, résumé quotidien)."""
+async def envoyer_message_simple(texte: str, repondre_a: int | None = None) -> int | None:
+    """
+    Envoie un message texte simple (ex: démarrage du bot, résumé quotidien).
+
+    repondre_a : message_id auquel rattacher ce message (fil de réponse
+    Telegram). Utilisé par le suivi 10s pour s'afficher directement sous
+    l'alerte qu'il analyse, au lieu d'un message isolé qu'on ne sait plus
+    relier à rien.
+
+    Retourne le message_id envoyé, ou None.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
+        return None
 
-    return await _envoyer_payload({
+    payload = {
         "chat_id": TELEGRAM_CHAT_ID, "text": texte, "parse_mode": "HTML",
-    })
+    }
+    # allow_sending_without_reply : si le message d'origine a été supprimé
+    # entre-temps, Telegram envoie quand même le message au lieu de tout
+    # refuser avec une erreur "message to reply not found".
+    if repondre_a and repondre_a > 0:
+        payload["reply_to_message_id"] = repondre_a
+        payload["allow_sending_without_reply"] = True
+
+    return await _envoyer_payload(payload)
 
 
 # ============================================================

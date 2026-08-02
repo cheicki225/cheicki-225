@@ -29,7 +29,10 @@ import time
 
 import stockage
 import frais_retrait
-from config import FRAIS_TRADING_PCT
+from config import (
+    FRAIS_TRADING_PCT, SUIVI_DUREE_SEC, SUIVI_INTERVALLE_SEC,
+    SUIVI_AGE_MAX_PRIX_SEC, SUIVI_ENVOYER_SEULEMENT_SI_POSITIF,
+)
 
 log = logging.getLogger("suivi_opportunite")
 
@@ -40,8 +43,11 @@ COLONNES = [
     "profit_usdt", "donnee_manquante",
 ]
 
-DUREE_SUIVI_SEC = 10
-INTERVALLE_SEC = 1.0
+# Réglages lus depuis config.py (tout est centralisé là-bas, comme le reste
+# du projet) — les noms courts restent utilisables dans ce module.
+DUREE_SUIVI_SEC = SUIVI_DUREE_SEC
+INTERVALLE_SEC = SUIVI_INTERVALLE_SEC
+AGE_MAX_PRIX_SEC = SUIVI_AGE_MAX_PRIX_SEC
 
 # Montant de référence pour le calcul du spread net — identique au montant
 # standard utilisé par paper_trading (MONTANT_PAR_TRADE_USDT = 50.0), pour
@@ -49,10 +55,6 @@ INTERVALLE_SEC = 1.0
 # vers paper_trading pour garder ce module indépendant (aucun risque de
 # import circulaire si paper_trading importe ce module plus tard).
 MONTANT_SUIVI_USDT = 50.0
-
-# Un prix plus vieux que ça n'est plus "observé maintenant" — c'est un flux
-# WebSocket coupé ou muet, pas une lecture valide à cet instant précis.
-AGE_MAX_PRIX_SEC = 5.0
 
 
 def _init_csv():
@@ -105,14 +107,25 @@ def _calculer_point(ex_achat: str, ex_vente: str, prix_achat: float, prix_vente:
     return spread_brut_pct, spread_net_pct, profit_usdt
 
 
-async def suivre_opportunite(opp, prix_live: dict, montant_usdt: float = MONTANT_SUIVI_USDT):
+async def suivre_opportunite(
+    opp, prix_live: dict, montant_usdt: float = MONTANT_SUIVI_USDT,
+    message_id_alerte: int | None = None, notifier: bool = True,
+):
     """
     Suit une opportunité pendant DUREE_SUIVI_SEC secondes, une lecture par
     seconde, directement depuis le cache prix_live déjà rempli par les
     WebSockets de bot_fusionne_v1.py.
 
+    message_id_alerte : id du message d'alerte Telegram correspondant. Le
+        résumé sera envoyé EN RÉPONSE à ce message, pour qu'on voie
+        immédiatement quelle opportunité il analyse.
+    notifier : False = on remplit le CSV mais on n'envoie rien sur Telegram
+        (utilisé en mode nuit : la collecte de données continue, seules les
+        notifications sont coupées).
+
     À lancer en tâche de fond juste après l'alerte Telegram initiale :
-        asyncio.create_task(suivi_opportunite.suivre_opportunite(opp, prix_live))
+        asyncio.create_task(suivi_opportunite.suivre_opportunite(
+            opp, prix_live, message_id_alerte=mid))
     """
     _init_csv()
 
@@ -157,18 +170,46 @@ async def suivre_opportunite(opp, prix_live: dict, montant_usdt: float = MONTANT
         if seconde < DUREE_SUIVI_SEC - 1:
             await asyncio.sleep(INTERVALLE_SEC)
 
-    await _envoyer_resume_telegram(symbole, ex_achat, ex_vente, montant_usdt, points)
+    await _envoyer_resume_telegram(
+        symbole, ex_achat, ex_vente, montant_usdt, points,
+        message_id_alerte=message_id_alerte, notifier=notifier,
+    )
 
 
-async def _envoyer_resume_telegram(symbole: str, ex_achat: str, ex_vente: str, montant_usdt: float, points: list):
+async def _envoyer_resume_telegram(
+    symbole: str, ex_achat: str, ex_vente: str, montant_usdt: float, points: list,
+    message_id_alerte: int | None = None, notifier: bool = True,
+):
     import telegram_notifier  # import tardif, même pattern que paper_trading.py
+
+    if not notifier:
+        log.debug(f"Suivi {symbole} : résumé Telegram non envoyé (notifications coupées) — CSV rempli")
+        return
 
     valides = [(s, v) for s, v in points if v is not None]
 
     if not valides:
+        # Aucun prix reçu : c'est un problème de flux, pas une opportunité.
+        # Vaut la peine d'être signalé, mais jamais en réponse à rien.
         await telegram_notifier.envoyer_message_simple(
             f"📉 <b>Suivi 10s</b> — {symbole} {ex_achat}→{ex_vente}\n"
-            f"Aucune donnée de prix reçue pendant le suivi (flux WebSocket muet sur cette fenêtre)."
+            f"Aucune donnée de prix reçue pendant le suivi (flux WebSocket muet sur cette fenêtre).",
+            repondre_a=message_id_alerte,
+        )
+        return
+
+    a_ete_positif = any(v > 0 for _, v in valides)
+
+    # Filtre anti-spam : les suivis négatifs du début à la fin sont
+    # largement majoritaires et disent tous exactement la même chose. Les
+    # notifier sature le quota Telegram (voir le calcul de charge dans
+    # config.py) sans rien apprendre de nouveau. Le CSV, lui, garde TOUT —
+    # rien n'est perdu pour l'analyse.
+    if SUIVI_ENVOYER_SEULEMENT_SI_POSITIF and not a_ete_positif:
+        log.info(
+            f"📉 Suivi {symbole} {ex_achat}→{ex_vente} : négatif sur toute la fenêtre "
+            f"({valides[0][1]:+.2f}% → {valides[-1][1]:+.2f}%) — enregistré au CSV, "
+            f"résumé Telegram omis (SUIVI_ENVOYER_SEULEMENT_SI_POSITIF=True)"
         )
         return
 
@@ -178,6 +219,7 @@ async def _envoyer_resume_telegram(symbole: str, ex_achat: str, ex_vente: str, m
 
     depart_pct = valides[0][1]
     fin_pct = valides[-1][1]
+    meilleur_pct = max(v for _, v in valides)
 
     # Première seconde où le spread net est passé (ou repassé) négatif —
     # c'est l'info la plus utile : le point de bascule gain -> perte
@@ -185,18 +227,20 @@ async def _envoyer_resume_telegram(symbole: str, ex_achat: str, ex_vente: str, m
     if bascule is not None:
         ligne_bascule = f"⚠️ Passé négatif à t={bascule}s"
     elif fin_pct > 0:
-        ligne_bascule = "✅ Resté positif sur toute la fenêtre de 10s"
+        ligne_bascule = f"✅ Resté positif sur toute la fenêtre de {DUREE_SUIVI_SEC}s"
     else:
         ligne_bascule = "❌ Négatif dès le départ"
 
     emoji = "🟢" if fin_pct > 0 else "🔴"
 
     await telegram_notifier.envoyer_message_simple(
-        f"{emoji} <b>Suivi 10s</b> — {symbole} {ex_achat}→{ex_vente}\n"
+        f"{emoji} <b>Suivi {DUREE_SUIVI_SEC}s</b> — {symbole} {ex_achat}→{ex_vente}\n"
         f"Spread net par seconde (sur {montant_usdt:.0f}$, frais trading + retrait inclus) :\n"
         f"<code>{ligne_evolution}</code>\n"
-        f"Départ : {depart_pct:+.2f}% → Fin (t=10s) : {fin_pct:+.2f}%\n"
-        f"{ligne_bascule}"
+        f"Départ : {depart_pct:+.2f}% → Fin (t={DUREE_SUIVI_SEC}s) : {fin_pct:+.2f}%"
+        f" | meilleur : {meilleur_pct:+.2f}%\n"
+        f"{ligne_bascule}",
+        repondre_a=message_id_alerte,
     )
 
 
