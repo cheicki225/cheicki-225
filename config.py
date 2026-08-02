@@ -173,3 +173,25 @@ SEUIL_REEQUILIBRAGE_PCT = 50.0
 # Frais de transfert simulé (réseau SOL ~0.01$, TRC20 ~1$ — on prend une
 # estimation prudente pour ne pas sous-estimer le coût réel)
 FRAIS_TRANSFERT_SIMULE_USDT = 0.5
+
+
+# ============================================================
+# STOCKS DE TOKENS (contrainte de capital réelle)
+# ============================================================
+# Pour VENDRE un token sur une plateforme, il faut l'y détenir à l'avance.
+# Un transfert d'USDT ne crée pas ce stock. Avec un capital limité, on ne
+# peut donc pré-positionner qu'un nombre restreint de tokens — c'est la
+# contrainte qui rend la majorité des opportunités détectées inexploitables
+# en pratique, et que la simulation ignorait jusqu'ici.
+#
+# Mets SUIVI_STOCKS_ACTIF à False pour revenir à l'ancien comportement
+# (aucune contrainte de stock, chiffres plus flatteurs mais irréalistes).
+SUIVI_STOCKS_ACTIF = True
+
+# Nombre de tokens DIFFÉRENTS que tu peux tenir en stock simultanément.
+# Avec 1200$ répartis sur 6 plateformes, en immobilisant 50$ par token,
+# une dizaine de positions est déjà un maximum réaliste.
+MAX_TOKENS_EN_STOCK = 10
+
+# Valeur immobilisée par token, sur la plateforme où tu comptes vendre
+VALEUR_STOCK_PAR_TOKEN_USDT = 50.0

@@ -33,6 +33,8 @@ from config import (
     CIRCUIT_BREAKER_PERTES_CONSECUTIVES, CIRCUIT_BREAKER_ACTIVE, STOP_LOSS_JOURNALIER_USDT,
     DOUBLE_VERIFICATION_DELAI_SEC, CAPITAL_PAR_EXCHANGE_PAPIER,
     SEUIL_REEQUILIBRAGE_PCT, FRAIS_TRANSFERT_SIMULE_USDT, RESEAU_PREFERE, RESEAU_FALLBACK,
+    MAX_TOKENS_EN_STOCK, VALEUR_STOCK_PAR_TOKEN_USDT, SUIVI_STOCKS_ACTIF,
+    FRAIS_TRADING_PCT,
 )
 
 log = logging.getLogger("paper_trading")
@@ -69,6 +71,7 @@ _etat_papier = {
     "nb_trades_reussis": 0,
     "nb_trades_rejetes_liquidite": 0,
     "nb_trades_rejetes_double_verif": 0,
+    "nb_trades_rejetes_stock": 0,
     "nb_trades_total": 0,
     "nb_cryptos_eliminees": 0,
 }
@@ -277,6 +280,79 @@ def _appliquer_mouvement_trade(ex_achat, ex_vente, montant_usdt, profit_net_usdt
     _soldes_virtuels[ex_vente] += profit_net_usdt
 
 
+# ============================================================
+# STOCKS DE TOKENS PAR PLATEFORME
+# ============================================================
+# Vendre un token sur une plateforme suppose de l'y détenir. Un transfert
+# d'USDT ne crée pas ce stock — il faut avoir acheté le token à l'avance.
+# Avec un capital limité, seul un petit nombre de tokens peut être
+# pré-positionné : c'est cette contrainte qui rend inexploitable la
+# majorité des opportunités détectées.
+#
+# {exchange: {symbole: quantité}}
+_stocks_tokens: dict[str, dict[str, float]] = {}
+
+
+def _tokens_en_stock() -> set:
+    """Ensemble des symboles pour lesquels un stock est ouvert quelque part."""
+    return {s for par_ex in _stocks_tokens.values() for s, q in par_ex.items() if q > 0}
+
+
+def _stock_disponible(exchange: str, symbole: str) -> float:
+    return _stocks_tokens.get(exchange, {}).get(symbole, 0.0)
+
+
+def _tenter_ouvrir_stock(exchange: str, symbole: str, prix_unitaire: float, frais_pct: float) -> bool:
+    """
+    Ouvre une position de stock sur un token, si le capital et le nombre de
+    positions le permettent. Retourne True si le stock est désormais ouvert.
+
+    Le coût est réel : on immobilise VALEUR_STOCK_PAR_TOKEN_USDT sur la
+    plateforme, plus les frais d'achat. C'est du capital qui ne travaille
+    plus ailleurs.
+    """
+    if prix_unitaire <= 0:
+        return False
+
+    deja = _tokens_en_stock()
+    if symbole not in deja and len(deja) >= MAX_TOKENS_EN_STOCK:
+        return False  # toutes les positions sont occupées
+
+    _obtenir_solde(exchange)
+    cout_achat = VALEUR_STOCK_PAR_TOKEN_USDT * (1 + frais_pct / 100)
+    if _soldes_virtuels[exchange] < cout_achat:
+        return False  # pas assez de capital sur cette plateforme
+
+    _soldes_virtuels[exchange] -= cout_achat
+    # Les frais d'acquisition sont un coût réel, pas une écriture neutre
+    frais = VALEUR_STOCK_PAR_TOKEN_USDT * (frais_pct / 100)
+    _etat_papier["profit_cumule_usdt"] -= frais
+    _jour_actuel["profit_du_jour"] -= frais
+
+    quantite = VALEUR_STOCK_PAR_TOKEN_USDT / prix_unitaire
+    _stocks_tokens.setdefault(exchange, {})
+    _stocks_tokens[exchange][symbole] = _stocks_tokens[exchange].get(symbole, 0.0) + quantite
+
+    log.info(
+        f"📦 Stock ouvert : {quantite:.6g} {symbole} sur {exchange} "
+        f"({VALEUR_STOCK_PAR_TOKEN_USDT:.0f}$ immobilisés, frais {frais:.3f}$)"
+    )
+    return True
+
+
+def _appliquer_mouvement_stock(ex_achat, ex_vente, symbole, quantite):
+    """Après le trade : le token quitte la plateforme de vente, arrive sur celle d'achat."""
+    _stocks_tokens.setdefault(ex_vente, {})
+    _stocks_tokens.setdefault(ex_achat, {})
+    _stocks_tokens[ex_vente][symbole] = _stocks_tokens[ex_vente].get(symbole, 0.0) - quantite
+    _stocks_tokens[ex_achat][symbole] = _stocks_tokens[ex_achat].get(symbole, 0.0) + quantite
+
+
+def obtenir_stocks() -> dict:
+    """Copie des stocks de tokens actuels, pour le dashboard."""
+    return {ex: dict(t) for ex, t in _stocks_tokens.items() if any(q > 0 for q in t.values())}
+
+
 def obtenir_soldes():
     """Retourne une copie des soldes fictifs actuels par exchange."""
     return dict(_soldes_virtuels)
@@ -315,33 +391,50 @@ def _verifier_besoin_reequilibrage():
 
 def simuler_transfert(exchange_source, exchange_dest, montant_usdt, raison="Manuel"):
     """
-    Simule un transfert entre 2 exchanges (réseau SOL prioritaire) — déduit
-    les frais simulés, mais NE FAIT AUCUN appel API réel.
+    Simule un transfert entre 2 exchanges — NE FAIT AUCUN appel API réel.
+
+    Les frais sont ceux du réseau le moins cher réellement utilisable entre
+    les deux plateformes (voir frais_retrait), avec repli sur la constante
+    de configuration si les données publiques ne sont pas disponibles.
+
+    ⚠️ CORRECTIF : ces frais sont désormais déduits de profit_cumule_usdt.
+    Une version antérieure les retirait des soldes virtuels sans jamais
+    toucher au profit affiché — celui-ci était donc surestimé du montant
+    total des rééquilibrages, sans que rien ne le signale.
     """
     _init_transferts_csv()
     _obtenir_solde(exchange_source)
     _obtenir_solde(exchange_dest)
 
-    if _soldes_virtuels[exchange_source] < montant_usdt + FRAIS_TRANSFERT_SIMULE_USDT:
+    import frais_retrait
+    info = frais_retrait.frais_transfert(exchange_source, exchange_dest, montant_usdt)
+    frais = info["frais"] if not info["est_estime"] else FRAIS_TRANSFERT_SIMULE_USDT
+    reseau = info["reseau"] if not info["est_estime"] else RESEAU_PREFERE
+
+    if _soldes_virtuels[exchange_source] < montant_usdt + frais:
         log.warning(f"🚫 Transfert simulé impossible : solde insuffisant sur {exchange_source}")
         return {"execute": False, "raison": "solde insuffisant"}
 
-    _soldes_virtuels[exchange_source] -= (montant_usdt + FRAIS_TRANSFERT_SIMULE_USDT)
+    _soldes_virtuels[exchange_source] -= (montant_usdt + frais)
     _soldes_virtuels[exchange_dest] += montant_usdt
+
+    # Le rééquilibrage est un COÛT RÉEL : il doit peser sur le profit affiché
+    _etat_papier["profit_cumule_usdt"] -= frais
+    _jour_actuel["profit_du_jour"] -= frais
 
     with open(TRANSFERTS_CSV_PATH, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=TRANSFERTS_COLONNES).writerow({
             "timestamp": time.time(),
             "exchange_source": exchange_source, "exchange_destination": exchange_dest,
-            "montant_usdt": montant_usdt, "frais_usdt": FRAIS_TRANSFERT_SIMULE_USDT,
-            "reseau": RESEAU_PREFERE, "raison": raison,
+            "montant_usdt": montant_usdt, "frais_usdt": round(frais, 4),
+            "reseau": reseau, "raison": raison,
         })
 
     log.info(
         f"💸 Transfert SIMULÉ : {montant_usdt:.2f}$ {exchange_source} → {exchange_dest} "
-        f"(frais simulés {FRAIS_TRANSFERT_SIMULE_USDT}$, réseau {RESEAU_PREFERE}) — {raison}"
+        f"(frais {frais:.3f}$, réseau {reseau}) — {raison}"
     )
-    return {"execute": True, "montant": montant_usdt, "frais": FRAIS_TRANSFERT_SIMULE_USDT}
+    return {"execute": True, "montant": montant_usdt, "frais": frais}
 
 
 def stats_soldes():
@@ -440,6 +533,29 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     montant_reel = min(montant_usdt, montant_executable)
     liquidite_partielle = montant_reel < montant_usdt - 0.01
 
+    # --- CONTRÔLE DE STOCK ---
+    # Vendre un token sur une plateforme suppose de l'y détenir. Sans stock,
+    # le trade est simplement IMPOSSIBLE dans la réalité — même si l'écart
+    # de prix est excellent. C'est la contrainte qui élimine la majorité des
+    # opportunités détectées quand le capital est limité.
+    if SUIVI_STOCKS_ACTIF:
+        prix_vente_ref = resultat["prix_vente_reel"]
+        quantite_requise = montant_reel / prix_vente_ref if prix_vente_ref > 0 else 0
+
+        if _stock_disponible(ex_vente, symbol) < quantite_requise:
+            # Pas de stock : on tente d'en ouvrir un (coût réel, capital immobilisé)
+            ouvert = _tenter_ouvrir_stock(
+                ex_vente, symbol, prix_vente_ref, FRAIS_TRADING_PCT.get(ex_vente, 0.10)
+            )
+            if not ouvert or _stock_disponible(ex_vente, symbol) < quantite_requise:
+                _etat_papier["nb_trades_rejetes_stock"] = _etat_papier.get("nb_trades_rejetes_stock", 0) + 1
+                _ecrire_ligne(ligne)
+                log.info(
+                    f"📦 Trade papier REJETÉ (pas de {symbol} en stock sur {ex_vente}) : "
+                    f"{ex_achat}->{ex_vente} | positions ouvertes {len(_tokens_en_stock())}/{MAX_TOKENS_EN_STOCK}"
+                )
+                return {"execute": False, "raison": "stock de token insuffisant"}
+
     spread_reel_pct = resultat["spread_reel_pct"]
     frais_trading_usdt = montant_reel * (frais_pct_total / 100)
 
@@ -491,6 +607,10 @@ async def simuler_trade(opp, frais_pct_total, montant_usdt=MONTANT_PAR_TRADE_USD
     # Met à jour les soldes fictifs par exchange et vérifie si un
     # rééquilibrage simulé est nécessaire (toujours en simulation)
     _appliquer_mouvement_trade(ex_achat, ex_vente, montant_reel, profit_net_usdt)
+    # Le token quitte la plateforme de vente et se reconstitue sur celle
+    # d'achat — c'est ce déplacement qui impose le SECOND transfert.
+    if SUIVI_STOCKS_ACTIF:
+        _appliquer_mouvement_stock(ex_achat, ex_vente, symbol, quantite_requise)
     _verifier_besoin_reequilibrage()
 
     log.info(
