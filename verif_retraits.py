@@ -1,0 +1,457 @@
+"""
+Vérification de l'état des retraits/dépôts par TOKEN
+======================================================
+Répond à LA question qui bloque tout le reste : un écart de 13% sur PYBOBO
+entre gateio et kucoin est-il exploitable, ou le token est-il simplement
+prisonnier de la plateforme ?
+
+Un arbitrage ne peut se boucler que si le token peut PHYSIQUEMENT circuler :
+  - retrait OUVERT sur la plateforme d'achat
+  - dépôt OUVERT sur la plateforme de vente
+  - et un réseau COMMUN aux deux
+Si l'une de ces trois conditions manque, l'écart peut rester à 13%
+indéfiniment : ce n'est pas une opportunité, c'est un blocage structurel —
+et c'est justement pour ça que l'écart ne se referme jamais.
+
+⚠️ COUVERTURE : 3 plateformes sur 6
+kucoin, bitget et gateio exposent ces états publiquement, sans clé API.
+binance, bybit et okx exigent une clé API signée pour la même information —
+elles sont donc marquées "inconnu" plutôt que supposées ouvertes.
+Ce n'est pas une limite gênante en pratique : les plus gros écarts observés
+viennent précisément de gateio et kucoin.
+
+⚠️ DIFFÉRENCE AVEC frais_retrait.py
+frais_retrait.py ne regarde QUE l'USDT (pour le transfert retour) et, pour
+gateio, force `retrait_ouvert=True` car son endpoint (withdraw_status)
+n'expose pas cet état. Ici on utilise /spot/currencies, qui donne les vrais
+drapeaux withdraw_disabled / deposit_disabled, et on interroge N'IMPORTE
+QUEL token.
+
+Usage en ligne de commande :
+    python3 verif_retraits.py COTI PYBOBO ZIL BTR BLUAI
+"""
+
+import asyncio
+import logging
+import sys
+
+import aiohttp
+
+log = logging.getLogger("verif_retraits")
+
+TIMEOUT = aiohttp.ClientTimeout(total=25)
+
+# Plateformes dont l'état des retraits n'est PAS récupérable sans clé API.
+# Marquées "inconnu" — jamais supposées ouvertes, ce serait le pire défaut
+# possible pour un outil censé détecter des blocages.
+EXCHANGES_SANS_DONNEES_PUBLIQUES = ("binance", "bybit", "okx")
+
+
+def _normaliser_reseau(nom) -> str:
+    """Aligne les noms de réseaux entre plateformes (TRC20/TRX/Tron -> TRX...)."""
+    if not nom:
+        return "?"
+    n = str(nom).strip().upper()
+    equivalences = {
+        "TRC20": "TRX", "TRON": "TRX", "TRC-20": "TRX",
+        "ERC20": "ETH", "ERC-20": "ETH", "ETHEREUM": "ETH",
+        "BEP20": "BSC", "BEP-20": "BSC", "BSC(BEP20)": "BSC",
+        "BINANCE SMART CHAIN": "BSC", "BNB SMART CHAIN": "BSC",
+        "SOLANA": "SOL", "POLYGON": "MATIC", "ARBITRUM ONE": "ARBITRUM",
+        "AVALANCHE C-CHAIN": "AVAX_CCHAIN", "AVAX C-CHAIN": "AVAX_CCHAIN",
+    }
+    return equivalences.get(n, n)
+
+
+def _vrai_sauf_si_faux(valeur) -> bool:
+    """Absent ou nul = on considère ouvert ; seul un False explicite ferme."""
+    return str(valeur).lower() not in ("false", "0", "none")
+
+
+# ============================================================
+# PARSERS — un par plateforme, tous sur des endpoints publics
+# ============================================================
+def _parser_kucoin(data, token: str) -> dict | None:
+    """https://api.kucoin.com/api/v3/currencies"""
+    if not isinstance(data, dict):
+        return None
+    for devise in data.get("data", []) or []:
+        if not isinstance(devise, dict) or str(devise.get("currency", "")).upper() != token:
+            continue
+        reseaux = {}
+        for chaine in devise.get("chains", []) or []:
+            if not isinstance(chaine, dict):
+                continue
+            reseaux[_normaliser_reseau(chaine.get("chainName") or chaine.get("chainId"))] = {
+                "retrait_ouvert": _vrai_sauf_si_faux(chaine.get("isWithdrawEnabled")),
+                "depot_ouvert": _vrai_sauf_si_faux(chaine.get("isDepositEnabled")),
+            }
+        return {"trouve": True, "reseaux": reseaux}
+    return None
+
+
+def _parser_bitget(data, token: str) -> dict | None:
+    """https://api.bitget.com/api/v2/spot/public/coins"""
+    if not isinstance(data, dict):
+        return None
+    for devise in data.get("data", []) or []:
+        if not isinstance(devise, dict) or str(devise.get("coin", "")).upper() != token:
+            continue
+        reseaux = {}
+        for chaine in devise.get("chains", []) or []:
+            if not isinstance(chaine, dict):
+                continue
+            reseaux[_normaliser_reseau(chaine.get("chain"))] = {
+                "retrait_ouvert": _vrai_sauf_si_faux(chaine.get("withdrawable")),
+                "depot_ouvert": _vrai_sauf_si_faux(chaine.get("rechargeable")),
+            }
+        return {"trouve": True, "reseaux": reseaux}
+    return None
+
+
+def _parser_gateio(data, token: str) -> dict | None:
+    """
+    https://api.gateio.ws/api/v4/spot/currencies
+
+    Cet endpoint expose withdraw_disabled / deposit_disabled — contrairement
+    à /wallet/withdraw_status utilisé par frais_retrait.py, qui ne les donne
+    pas (d'où le `retrait_ouvert=True` codé en dur là-bas).
+    Format : une entrée par (devise, chaîne), currency = "COTI" ou "COTI_ETH".
+    """
+    if not isinstance(data, list):
+        return None
+    reseaux = {}
+    trouve = False
+    for devise in data:
+        if not isinstance(devise, dict):
+            continue
+        currency = str(devise.get("currency", "")).upper()
+        base = currency.split("_")[0]
+        if base != token:
+            continue
+        trouve = True
+        chaine = devise.get("chain") or (currency.split("_", 1)[1] if "_" in currency else token)
+        reseaux[_normaliser_reseau(chaine)] = {
+            # Attention à la double négation : le champ dit "disabled"
+            "retrait_ouvert": not _vrai_sauf_si_faux(devise.get("withdraw_disabled")),
+            "depot_ouvert": not _vrai_sauf_si_faux(devise.get("deposit_disabled")),
+            "trading_ouvert": not _vrai_sauf_si_faux(devise.get("trade_disabled")),
+        }
+    return {"trouve": True, "reseaux": reseaux} if trouve else None
+
+
+SOURCES = {
+    "kucoin": ("https://api.kucoin.com/api/v3/currencies", _parser_kucoin),
+    "bitget": ("https://api.bitget.com/api/v2/spot/public/coins", _parser_bitget),
+    "gateio": ("https://api.gateio.ws/api/v4/spot/currencies", _parser_gateio),
+}
+
+
+# ============================================================
+# RÉCUPÉRATION
+# ============================================================
+async def _telecharger_tout() -> dict:
+    """Une seule requête par plateforme, réutilisée pour tous les tokens."""
+    brut = {}
+
+    async def _un(exchange, url):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=TIMEOUT) as resp:
+                    if resp.status != 200:
+                        log.warning(f"{exchange} : statut HTTP {resp.status}")
+                        return exchange, None
+                    return exchange, await resp.json(content_type=None)
+        except Exception as e:
+            log.warning(f"{exchange} : échec ({e})")
+            return exchange, None
+
+    resultats = await asyncio.gather(
+        *(_un(ex, url) for ex, (url, _) in SOURCES.items())
+    )
+    for exchange, data in resultats:
+        brut[exchange] = data
+    return brut
+
+
+def _etat_token(brut: dict, token: str) -> dict:
+    """État du token sur chaque plateforme couverte."""
+    token = token.upper().replace("USDT", "") if token.upper().endswith("USDT") else token.upper()
+    etat = {}
+    for exchange, (_, parser) in SOURCES.items():
+        data = brut.get(exchange)
+        if data is None:
+            etat[exchange] = {"statut": "erreur_reseau", "reseaux": {}}
+            continue
+        try:
+            resultat = parser(data, token)
+        except Exception as e:
+            log.warning(f"{exchange} : erreur de lecture ({e})")
+            etat[exchange] = {"statut": "erreur_lecture", "reseaux": {}}
+            continue
+        if resultat is None:
+            etat[exchange] = {"statut": "token_absent", "reseaux": {}}
+        else:
+            etat[exchange] = {"statut": "ok", "reseaux": resultat["reseaux"]}
+    return etat
+
+
+def analyser_paire(etat: dict, ex_achat: str, ex_vente: str) -> dict:
+    """
+    Le cycle peut-il se boucler de ex_achat vers ex_vente ?
+    Il faut un réseau commun, ouvert au RETRAIT côté achat ET au DÉPÔT côté
+    vente. Un réseau rapide côté source ne sert à rien si la destination ne
+    l'accepte pas.
+    """
+    for exchange in (ex_achat, ex_vente):
+        if exchange in EXCHANGES_SANS_DONNEES_PUBLIQUES:
+            return {"verdict": "inconnu", "reseaux_ok": [],
+                    "raison": f"{exchange} n'expose pas ces données sans clé API"}
+
+    source = etat.get(ex_achat, {})
+    dest = etat.get(ex_vente, {})
+
+    for exchange, e in ((ex_achat, source), (ex_vente, dest)):
+        if e.get("statut") == "token_absent":
+            return {"verdict": "bloque", "reseaux_ok": [],
+                    "raison": f"token introuvable sur {exchange}"}
+        if e.get("statut", "").startswith("erreur"):
+            return {"verdict": "inconnu", "reseaux_ok": [],
+                    "raison": f"données indisponibles pour {exchange}"}
+
+    communs = []
+    for reseau, infos_src in source.get("reseaux", {}).items():
+        infos_dst = dest.get("reseaux", {}).get(reseau)
+        if infos_dst and infos_src.get("retrait_ouvert") and infos_dst.get("depot_ouvert"):
+            communs.append(reseau)
+
+    if communs:
+        return {"verdict": "ouvert", "reseaux_ok": sorted(communs), "raison": ""}
+
+    retraits = [r for r, i in source.get("reseaux", {}).items() if i.get("retrait_ouvert")]
+    if not retraits:
+        return {"verdict": "bloque", "reseaux_ok": [],
+                "raison": f"AUCUN retrait ouvert sur {ex_achat}"}
+
+    depots = [r for r, i in dest.get("reseaux", {}).items() if i.get("depot_ouvert")]
+    if not depots:
+        return {"verdict": "bloque", "reseaux_ok": [],
+                "raison": f"AUCUN dépôt ouvert sur {ex_vente}"}
+
+    return {"verdict": "bloque", "reseaux_ok": [],
+            "raison": f"aucun réseau commun ({ex_achat} : {', '.join(sorted(retraits)[:4])} / "
+                      f"{ex_vente} : {', '.join(sorted(depots)[:4])})"}
+
+
+async def verifier(tokens: list[str], paires: list[tuple[str, str]] | None = None) -> dict:
+    """
+    Vérifie une liste de tokens. `paires` par défaut : toutes les
+    combinaisons entre les plateformes couvertes.
+    """
+    if paires is None:
+        couverts = list(SOURCES)
+        paires = [(a, b) for a in couverts for b in couverts if a != b]
+
+    brut = await _telecharger_tout()
+    rapport = {}
+    for token in tokens:
+        etat = _etat_token(brut, token)
+        rapport[token.upper()] = {
+            "etat": etat,
+            "paires": {f"{a}->{b}": analyser_paire(etat, a, b) for a, b in paires},
+        }
+    return rapport
+
+
+def formater(rapport: dict) -> str:
+    """Rapport lisible en console."""
+    lignes = []
+    for token, donnees in rapport.items():
+        lignes.append(f"\n{'=' * 62}\n{token}\n{'=' * 62}")
+
+        for exchange, e in donnees["etat"].items():
+            if e["statut"] == "token_absent":
+                lignes.append(f"  {exchange:<8} : token non listé")
+                continue
+            if e["statut"].startswith("erreur"):
+                lignes.append(f"  {exchange:<8} : données indisponibles ({e['statut']})")
+                continue
+            ouverts = [r for r, i in e["reseaux"].items() if i.get("retrait_ouvert")]
+            fermes = [r for r, i in e["reseaux"].items() if not i.get("retrait_ouvert")]
+            lignes.append(
+                f"  {exchange:<8} : retrait ouvert sur {len(ouverts)}/{len(e['reseaux'])} réseaux"
+                + (f" — ouverts : {', '.join(sorted(ouverts)[:5])}" if ouverts else " — AUCUN")
+                + (f" | fermés : {', '.join(sorted(fermes)[:5])}" if fermes else "")
+            )
+
+        lignes.append("")
+        for paire, analyse in donnees["paires"].items():
+            marque = {"ouvert": "[OK]     ", "bloque": "[BLOQUE] ", "inconnu": "[?]      "}[analyse["verdict"]]
+            detail = (
+                f"réseaux utilisables : {', '.join(analyse['reseaux_ok'][:5])}"
+                if analyse["reseaux_ok"] else analyse["raison"]
+            )
+            lignes.append(f"  {marque}{paire:<20} {detail}")
+
+    return "\n".join(lignes)
+
+
+def resume_telegram(rapport: dict) -> str:
+    """Version courte, pour Telegram."""
+    lignes = ["🔎 <b>État des retraits</b>\n"]
+    for token, donnees in rapport.items():
+        verdicts = [a["verdict"] for a in donnees["paires"].values()]
+        ouverts = verdicts.count("ouvert")
+        total = len(verdicts)
+        if ouverts == 0:
+            emoji, texte = "🔴", "aucune paire exploitable"
+        elif ouverts == total:
+            emoji, texte = "🟢", "toutes les paires exploitables"
+        else:
+            emoji, texte = "🟡", f"{ouverts}/{total} paires exploitables"
+        lignes.append(f"{emoji} <b>{token}</b> — {texte}")
+
+        for paire, analyse in donnees["paires"].items():
+            if analyse["verdict"] == "bloque":
+                lignes.append(f"   ❌ {paire} : {analyse['raison']}")
+    return "\n".join(lignes)
+
+
+# ============================================================
+# UTILISATION EN DIRECT DANS LE BOT
+# ============================================================
+# La détection appelle paire_exploitable() à chaque tick de prix, pour
+# chaque permutation d'exchanges. Tout est donc servi depuis un cache
+# mémoire, alimenté par une seule série de requêtes toutes les 6 heures.
+_donnees_brutes: dict = {}
+_cache_verdicts: dict[tuple, dict] = {}
+_donnees_chargees = False
+
+# Compteurs, pour savoir ce que le filtre a réellement écarté
+_stats_filtre = {"autorise": 0, "bloque": 0, "inconnu": 0}
+
+
+def donnees_disponibles() -> bool:
+    return _donnees_chargees
+
+
+def statistiques_filtre() -> dict:
+    return dict(_stats_filtre)
+
+
+async def rafraichir():
+    """Recharge l'état des retraits pour toutes les plateformes couvertes."""
+    global _donnees_brutes, _donnees_chargees
+    brut = await _telecharger_tout()
+    recues = [ex for ex, d in brut.items() if d is not None]
+    if not recues:
+        log.warning("verif_retraits : aucune plateforme n'a répondu — filtre inopérant")
+        return
+    _donnees_brutes = brut
+    _donnees_chargees = True
+    _cache_verdicts.clear()
+    log.info(f"verif_retraits : {len(recues)}/{len(SOURCES)} plateformes chargées ({', '.join(recues)})")
+
+
+async def boucle_rafraichissement(intervalle_sec: float = 6 * 3600):
+    # Première tentative immédiate, puis rappel toutes les 6h. Tant que les
+    # données ne sont pas chargées, le mode strict bloque TOUT — un silence
+    # complet du bot serait alors dû au filtre, pas à l'absence d'écarts.
+    # D'où ce réessai rapproché et cet avertissement explicite.
+    echecs = 0
+    while True:
+        try:
+            await rafraichir()
+        except Exception as e:
+            log.error(f"verif_retraits : erreur de rafraîchissement ({e})")
+
+        if not _donnees_chargees:
+            echecs += 1
+            log.warning(
+                f"⚠️ verif_retraits : données toujours indisponibles ({echecs} tentative(s)). "
+                f"En mode strict, AUCUNE alerte ne peut passer tant que c'est le cas — "
+                f"bascule FILTRE_RETRAITS_MODE sur 'souple' ou FILTRE_RETRAITS_ACTIF sur False "
+                f"si le bot reste muet."
+            )
+            await asyncio.sleep(min(300 * echecs, 1800))  # réessai rapproché, plafonné à 30 min
+            continue
+
+        echecs = 0
+        await asyncio.sleep(intervalle_sec)
+
+
+def paire_exploitable(symbole: str, ex_achat: str, ex_vente: str) -> dict:
+    """
+    Synchrone et mis en cache : appelable dans la boucle de détection.
+
+    Retourne {"verdict": "ouvert"|"bloque"|"inconnu", "reseaux_ok", "raison"}.
+
+    "inconnu" n'est JAMAIS traité comme "ouvert" ici — c'est au code appelant
+    de décider quoi en faire (voir FILTRE_RETRAITS_MODE dans config.py).
+    Supposer qu'un retrait inconnu est ouvert reviendrait à désactiver
+    silencieusement le filtre sur la moitié des plateformes.
+    """
+    if not _donnees_chargees:
+        return {"verdict": "inconnu", "reseaux_ok": [], "raison": "données pas encore chargées"}
+
+    token = symbole.upper()
+    if token.endswith("USDT"):
+        token = token[:-4]
+
+    cle = (token, ex_achat, ex_vente)
+    en_cache = _cache_verdicts.get(cle)
+    if en_cache is not None:
+        return en_cache
+
+    try:
+        etat = _etat_token(_donnees_brutes, token)
+        resultat = analyser_paire(etat, ex_achat, ex_vente)
+    except Exception as e:
+        resultat = {"verdict": "inconnu", "reseaux_ok": [], "raison": f"erreur d'analyse ({e})"}
+
+    _cache_verdicts[cle] = resultat
+    return resultat
+
+
+def autorise_trade(symbole: str, ex_achat: str, ex_vente: str, mode: str = "strict") -> tuple[bool, str]:
+    """
+    Décision finale pour le bot.
+
+    mode "strict" : seul un retrait VÉRIFIÉ ouvert passe. Les paires
+        impliquant binance/bybit/okx (pas de données publiques) sont donc
+        écartées — c'est volontaire, mais ça réduit fortement le champ.
+    mode "souple" : seuls les blocages CONFIRMÉS écartent. Les cas inconnus
+        passent, comme avant l'ajout de ce filtre.
+    """
+    resultat = paire_exploitable(symbole, ex_achat, ex_vente)
+    verdict = resultat["verdict"]
+
+    if verdict == "ouvert":
+        _stats_filtre["autorise"] += 1
+        return True, ""
+    if verdict == "bloque":
+        _stats_filtre["bloque"] += 1
+        return False, resultat["raison"]
+
+    _stats_filtre["inconnu"] += 1
+    if mode == "souple":
+        return True, ""
+    return False, resultat["raison"] or "état des retraits inconnu"
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    tokens = [t.upper() for t in sys.argv[1:]] or ["COTI", "PYBOBO", "ZIL", "BTR", "BLUAI"]
+
+    print(f"Vérification de : {', '.join(tokens)}")
+    print("(kucoin, bitget, gateio — binance/bybit/okx exigent une clé API)\n")
+
+    rapport = asyncio.run(verifier(tokens))
+    print(formater(rapport))
+
+    print(f"\n{'=' * 62}\nLECTURE DU RÉSULTAT\n{'=' * 62}")
+    print("[OK]     le token peut circuler : l'écart mérite d'être creusé")
+    print("[BLOQUE] le cycle ne peut PAS se boucler — l'écart n'est pas")
+    print("         exploitable, et c'est très probablement POURQUOI il persiste")
+    print("[?]      plateforme sans données publiques (clé API requise)")

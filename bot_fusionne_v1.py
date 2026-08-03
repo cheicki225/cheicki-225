@@ -27,6 +27,7 @@ import paper_trading
 import api_server
 import suivi_opportunite
 import positions_attente
+import verif_retraits
 
 logging.basicConfig(
     level=logging.INFO,
@@ -463,7 +464,7 @@ from config import (
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
     SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
-    MONTANT_PAR_TRADE_USDT,
+    MONTANT_PAR_TRADE_USDT, FILTRE_RETRAITS_ACTIF, FILTRE_RETRAITS_MODE,
 )
 import filtre_ml
 import spreads_live
@@ -881,6 +882,23 @@ async def _traiter_opportunites_symbole(symbol: str, log):
             franchit_le_seuil = opp.spread_net_pct >= seuil_inter_actif
 
         if franchit_le_seuil:
+            # FILTRE DE RETIRABILITÉ — le token peut-il PHYSIQUEMENT circuler
+            # entre ces deux plateformes ? Sans retrait ouvert côté achat et
+            # dépôt ouvert côté vente, l'arbitrage ne peut pas se boucler : le
+            # bon écart affiché n'est alors qu'un blocage structurel.
+            # Placé APRÈS le seuil et AVANT l'alerte, donc la collecte ML en
+            # amont continue d'enregistrer ces cas — ils restent instructifs.
+            if FILTRE_RETRAITS_ACTIF:
+                autorise_retrait, motif_retrait = verif_retraits.autorise_trade(
+                    opp.symboles[0], opp.exchanges[0], opp.exchanges[1], FILTRE_RETRAITS_MODE
+                )
+                if not autorise_retrait:
+                    log.info(
+                        f"🚫 Écarté (retraits) : {opp.symboles[0]} "
+                        f"{opp.exchanges[0]}->{opp.exchanges[1]} — {motif_retrait}"
+                    )
+                    continue
+
             # Score ML (probabilité que l'opportunité tienne 5s) — None si le
             # modèle n'est pas encore entraîné/chargé, aucun impact dans ce cas
             opp.score_ml = filtre_ml.score_opportunite(opp)
@@ -1184,6 +1202,7 @@ async def main():
     tasks.append(asyncio.create_task(prix_24h.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
+    tasks.append(asyncio.create_task(verif_retraits.boucle_rafraichissement()))
 
     # Positions en attente : la surveillance a besoin du cache de prix
     # WebSocket pour savoir quand une position repasse positive. On le lui

@@ -321,6 +321,34 @@ VALEUR_STOCK_PAR_TOKEN_USDT = 50.0
 
 
 # ============================================================
+# FILTRE : NE TRADER QUE LES TOKENS RÉELLEMENT RETIRABLES
+# ============================================================
+# Un arbitrage ne peut se boucler que si le token peut PHYSIQUEMENT circuler
+# entre les deux plateformes : retrait ouvert côté achat, dépôt ouvert côté
+# vente, et un réseau commun aux deux.
+#
+# C'est la réponse au constat de fond : un écart de 13% qui PERSISTE sur un
+# token peu liquide n'est presque jamais une opportunité que tout le monde
+# aurait ratée — c'est un écart que personne ne PEUT refermer, parce que le
+# token est prisonnier de sa plateforme. Le filtre écarte ces cas.
+#
+# Voir verif_retraits.py. Données publiques, aucune clé API requise.
+FILTRE_RETRAITS_ACTIF = True
+
+# "strict" : le bot ne trade QUE les paires dont le retrait est VÉRIFIÉ
+#            ouvert. Seules kucoin, bitget et gateio exposent cette
+#            information publiquement — donc toutes les paires impliquant
+#            binance, bybit ou okx sont écartées, faute de preuve.
+#            ⚠️ Cela réduit fortement le nombre d'alertes. C'est le
+#            comportement demandé : ne trader que ce qui est sélectionné.
+#
+# "souple" : seuls les blocages CONFIRMÉS sont écartés. Les paires dont
+#            l'état est inconnu (binance/bybit/okx) continuent de passer.
+#            Utile si le mode strict assèche trop le flux d'alertes.
+FILTRE_RETRAITS_MODE = "strict"
+
+
+# ============================================================
 # POSITIONS EN ATTENTE (idée à tester — mode papier uniquement)
 # ============================================================
 # PRINCIPE : quand un trade se retrouve négatif au moment de la vente
