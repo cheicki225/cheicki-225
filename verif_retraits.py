@@ -296,6 +296,115 @@ def formater(rapport: dict) -> str:
     return "\n".join(lignes)
 
 
+def etat_par_exchange(symbole: str) -> dict:
+    """
+    Vue « une crypto, toutes les plateformes » : pour chaque plateforme,
+    l'état du retrait et du dépôt, avec les réseaux concernés.
+
+    Complète paire_exploitable(), qui répond « puis-je aller de A vers B ».
+    Ici on répond « où ce token peut-il entrer et sortir ».
+
+    Statuts possibles par plateforme :
+      "ouvert"   — au moins un réseau ouvert
+      "ferme"    — le token est listé mais AUCUN réseau n'est ouvert
+      "absent"   — le token n'est pas listé sur cette plateforme
+      "inconnu"  — plateforme sans données publiques (clé API requise),
+                   ou données pas encore chargées
+    """
+    token = symbole.upper()
+    if token.endswith("USDT"):
+        token = token[:-4]
+
+    resultat = {"token": token, "exchanges": {}}
+
+    for exchange in EXCHANGES_SANS_DONNEES_PUBLIQUES:
+        resultat["exchanges"][exchange] = {
+            "retrait": "inconnu", "depot": "inconnu", "reseaux_retrait": [],
+            "reseaux_depot": [], "raison": "clé API requise",
+        }
+
+    if not _donnees_chargees:
+        for exchange in SOURCES:
+            resultat["exchanges"][exchange] = {
+                "retrait": "inconnu", "depot": "inconnu", "reseaux_retrait": [],
+                "reseaux_depot": [], "raison": "données pas encore chargées",
+            }
+        return resultat
+
+    try:
+        etat = _etat_token(_donnees_brutes, token)
+    except Exception as e:
+        log.warning(f"etat_par_exchange({token}) : {e}")
+        return resultat
+
+    for exchange, infos in etat.items():
+        statut = infos.get("statut")
+        if statut == "token_absent":
+            resultat["exchanges"][exchange] = {
+                "retrait": "absent", "depot": "absent", "reseaux_retrait": [],
+                "reseaux_depot": [], "raison": "non listé",
+            }
+            continue
+        if statut != "ok":
+            resultat["exchanges"][exchange] = {
+                "retrait": "inconnu", "depot": "inconnu", "reseaux_retrait": [],
+                "reseaux_depot": [], "raison": statut,
+            }
+            continue
+
+        reseaux = infos.get("reseaux", {})
+        ouverts_retrait = sorted(r for r, i in reseaux.items() if i.get("retrait_ouvert"))
+        ouverts_depot = sorted(r for r, i in reseaux.items() if i.get("depot_ouvert"))
+        resultat["exchanges"][exchange] = {
+            "retrait": "ouvert" if ouverts_retrait else "ferme",
+            "depot": "ouvert" if ouverts_depot else "ferme",
+            "reseaux_retrait": ouverts_retrait,
+            "reseaux_depot": ouverts_depot,
+            "total_reseaux": len(reseaux),
+            "raison": "",
+        }
+
+    return resultat
+
+
+def matrice(symboles: list[str]) -> list[dict]:
+    """
+    Même chose pour une liste de tokens, avec un résumé exploitable.
+
+    `paires_possibles` est l'information qui compte vraiment : à quoi bon
+    savoir qu'un retrait est ouvert quelque part si aucune destination
+    n'accepte le dépôt sur un réseau commun ?
+    """
+    lignes = []
+    for symbole in symboles:
+        etat = etat_par_exchange(symbole)
+        exchanges = etat["exchanges"]
+
+        sorties = [ex for ex, i in exchanges.items() if i["retrait"] == "ouvert"]
+        entrees = [ex for ex, i in exchanges.items() if i["depot"] == "ouvert"]
+
+        paires = []
+        for source in sorties:
+            for dest in entrees:
+                if source == dest:
+                    continue
+                communs = set(exchanges[source]["reseaux_retrait"]) & set(exchanges[dest]["reseaux_depot"])
+                if communs:
+                    paires.append({
+                        "de": source, "vers": dest, "reseaux": sorted(communs),
+                    })
+
+        lignes.append({
+            **etat,
+            "sorties_ouvertes": sorted(sorties),
+            "entrees_ouvertes": sorted(entrees),
+            "paires_possibles": paires,
+            "nb_paires_possibles": len(paires),
+            "circulable": bool(paires),
+        })
+    return lignes
+
+
 def resume_telegram(rapport: dict) -> str:
     """Version courte, pour Telegram."""
     lignes = ["🔎 <b>État des retraits</b>\n"]

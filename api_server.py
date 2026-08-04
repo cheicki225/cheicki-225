@@ -375,6 +375,46 @@ async def handler_ml_stats(request):
     })
 
 
+async def handler_retraits(request):
+    """
+    Matrice de circulation : pour chaque crypto suivie, où le retrait et le
+    dépôt sont ouverts, et quels trajets entre plateformes sont réellement
+    possibles.
+
+    Paramètre optionnel `symboles` (séparés par des virgules). Sans lui, on
+    prend les cryptos actuellement surveillées, limitées à 60 — la réponse
+    est calculée depuis le cache de verif_retraits (aucun appel réseau),
+    mais 300+ tokens x 6 plateformes ferait une réponse inutilement lourde.
+    """
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import verif_retraits
+
+    demandes = request.query.get("symboles", "").strip()
+    if demandes:
+        symboles = [s.strip().upper() for s in demandes.split(",") if s.strip()][:60]
+    else:
+        import bot_fusionne_v1
+        vus = set()
+        for symboles_exchange in bot_fusionne_v1.prix_live.values():
+            vus.update(symboles_exchange.keys())
+        symboles = sorted(vus)[:60]
+
+    if not verif_retraits.donnees_disponibles():
+        return _reponse_json({
+            "pret": False,
+            "message": "Données de retrait pas encore chargées (relevé au démarrage puis toutes les 6h)",
+            "cryptos": [],
+        })
+
+    return _reponse_json({
+        "pret": True,
+        "sans_donnees_publiques": list(verif_retraits.EXCHANGES_SANS_DONNEES_PUBLIQUES),
+        "cryptos": verif_retraits.matrice(symboles),
+    })
+
+
 async def handler_transferts(request):
     if not _verifier_auth(request):
         return _reponse_json({"erreur": "non autorisé"}, 401)
@@ -630,6 +670,7 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/blacklist", handler_blacklist)
     app.router.add_get("/api/historique", handler_historique)
     app.router.add_get("/api/ml_stats", handler_ml_stats)
+    app.router.add_get("/api/retraits", handler_retraits)
     app.router.add_get("/api/transferts", handler_transferts)
     app.router.add_get("/api/erreurs", handler_erreurs)
     app.router.add_get("/api/config", handler_config)
