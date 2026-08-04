@@ -162,15 +162,20 @@ RESEAU_FALLBACK = "TRC20"
 #   2. le résultat du trade papier         (paper_trading.simuler_trade)
 #   3. le résumé du suivi 10s              (suivi_opportunite) [ajouté le 02/08]
 #   4. la clôture d'une position en attente (positions_attente) [ajouté le 02/08]
+#   5. les alertes d'arbitrage perpétuel      (arbitrage_perpetuel) [03/08]
+#      — débit très faible : cooldown de 30 min par couple, donc quelques
+#        messages par heure au plus, mais il faut leur laisser de la place.
 #
-# 5 alertes/minute x 4 messages = 20 messages/minute, à la limite exacte.
+# 4 alertes/minute x 4 messages = 16 messages/minute, ce qui laisse ~4
+# messages/minute de marge pour les alertes perpétuelles et les messages
+# système (démarrage, résumés, circuit breaker).
 # (8 x 3 = 24 et 6 x 4 = 24 étaient tous deux AU-DESSUS de la limite — d'où
 #  les baisses successives 8 -> 6 -> 5 à chaque nouveau type de message.)
 # En pratique les clôtures de positions sont bornées par MAX_POSITIONS_EN_ATTENTE
 # (3), donc la charge réelle reste bien en dessous de ce pire cas théorique.
 # En pratique c'est encore moins, car le résumé de suivi n'est envoyé que
 # s'il est informatif (voir SUIVI_ENVOYER_SEULEMENT_SI_POSITIF ci-dessous).
-MAX_ALERTES_PAR_MINUTE = 5
+MAX_ALERTES_PAR_MINUTE = 4
 
 # Cooldown minimum entre deux alertes/trades sur la MÊME crypto, peu importe
 # la combinaison d'exchanges — évite qu'une crypto volatile ne déclenche
@@ -318,6 +323,57 @@ MAX_TOKENS_EN_STOCK = 10
 
 # Valeur immobilisée par token, sur la plateforme où tu comptes vendre
 VALEUR_STOCK_PAR_TOKEN_USDT = 50.0
+
+
+# ============================================================
+# NOUVELLES COTATIONS (nouveaux_listings.py)
+# ============================================================
+# Détecte les paires qui apparaissent sur une plateforme où elles n'étaient
+# pas au relevé précédent. Les premières heures d'une cotation sont un des
+# rares moments où un écart large est RÉEL plutôt que le symptôme d'un
+# blocage : le carnet est mince, le prix n'a pas encore convergé.
+# ⚠️ C'est aussi le moment le plus risqué (volatilité extrême, liquidité
+# quasi nulle, retraits souvent fermés au début). Croise avec verif_retraits.
+LISTINGS_ACTIF = True
+
+# 30 min : les cotations ne sont pas si fréquentes, inutile de marteler les
+# API. Chaque relevé interroge les 6 plateformes.
+LISTINGS_INTERVALLE_SEC = 1800
+
+
+# ============================================================
+# ARBITRAGE SPOT-FUTURES (PERPÉTUEL) ET FUNDING
+# ============================================================
+# Voir arbitrage_perpetuel.py. Intérêt principal : les deux jambes sont sur
+# LA MÊME plateforme, donc AUCUN transfert entre exchanges — ni retrait
+# fermé, ni délai blockchain, ni frais de retrait fixes. C'est précisément
+# le mur contre lequel bute l'arbitrage inter-plateformes classique.
+PERP_ACTIF = True
+
+# Base minimale (perp au-dessus du spot, en %) pour signaler un arbitrage
+# de convergence. Le coût d'un cycle complet est d'environ 0.40% à 0.80%
+# selon la plateforme (4 ordres), donc en dessous de ~0.8% il ne reste rien.
+PERP_SEUIL_BASE_PCT = 1.0
+
+# Funding minimal, en taux ANNUALISÉ (%), pour signaler une position de
+# récolte. 50% annualisé = environ 0.046% par période de 8h.
+# ⚠️ Un taux annualisé n'est PAS une promesse de rendement : il suppose que
+# le taux actuel se maintienne un an, ce qui n'arrive jamais. C'est une
+# unité de comparaison, pas une prévision.
+PERP_SEUIL_FUNDING_APR_PCT = 50.0
+
+# Intervalle de sondage REST. Le funding ne change qu'aux périodes (8h en
+# général) : inutile d'interroger plus souvent. Les WebSockets sont réservés
+# à l'arbitrage inter-plateformes, où la seconde compte.
+PERP_INTERVALLE_SONDAGE_SEC = 60
+
+# Montant de référence pour les calculs (mêmes conventions que le reste)
+PERP_MONTANT_USDT = 50.0
+
+# ⚠️ Chaque alerte perpétuelle est un message Telegram SUPPLÉMENTAIRE.
+# Le cooldown interne (30 min par couple plateforme/symbole/type) limite
+# fortement le débit, mais mets à False si le fil devient trop chargé.
+PERP_NOTIFIER = True
 
 
 # ============================================================

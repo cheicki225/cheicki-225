@@ -226,6 +226,19 @@ def _formater_message(opp) -> str:
         emoji_benefice = "🟢" if benefice > 0 else "🔴"
         lignes.append(f"{emoji_benefice} <b>BÉNÉFICE RÉEL : {benefice:+.3f}%</b>")
 
+    # Durée de vie de l'écart. Signal INVERSÉ : un écart qui traîne depuis
+    # des minutes n'a pas été « raté » par les autres — il n'est très
+    # probablement pas exploitable (retrait fermé, liquidité fantôme).
+    age_spread = getattr(opp, "age_spread_sec", None)
+    if age_spread is not None:
+        try:
+            import duree_spread
+            texte_age = duree_spread.formater(age_spread)
+            if texte_age:
+                lignes.append(texte_age)
+        except Exception:
+            pass
+
     score = getattr(opp, "score_ml", None)
     if score is not None:
         emoji_score = "🟢" if score >= 0.5 else "🟡" if score >= 0.2 else "🔴"

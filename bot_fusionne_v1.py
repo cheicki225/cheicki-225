@@ -28,6 +28,9 @@ import api_server
 import suivi_opportunite
 import positions_attente
 import verif_retraits
+import arbitrage_perpetuel
+import duree_spread
+import nouveaux_listings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -465,6 +468,7 @@ from config import (
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
     SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
     MONTANT_PAR_TRADE_USDT, FILTRE_RETRAITS_ACTIF, FILTRE_RETRAITS_MODE,
+    PERP_ACTIF, LISTINGS_ACTIF, LISTINGS_INTERVALLE_SEC,
 )
 import filtre_ml
 import spreads_live
@@ -500,6 +504,9 @@ class OpportuniteArbitrage:
     # spread_net_pct est la cible du pipeline ML (opportunity_logger le
     # relogge, le modèle est entraîné dessus). En changer la définition
     # rendrait incohérentes toutes les données déjà collectées.
+    # Depuis combien de temps l'écart existe sans interruption (secondes).
+    # Signal INVERSÉ : un écart ancien est suspect, pas prometteur.
+    age_spread_sec: float | None = None
     benefice_reel_pct: float | None = None
     frais_retrait_pct: float | None = None
     reseau_retrait: str | None = None
@@ -607,6 +614,10 @@ def detecter_arbitrage_inter_exchange(symbol: str, seuil_pct: float = SEUIL_MIN_
                 prix_achat_annonce=prix_achat, prix_vente_annonce=prix_vente,
             )
             _renseigner_benefice_reel(opportunite)
+            # Depuis combien de temps cet écart existe-t-il sans interruption ?
+            # Un écart qui dure est SUSPECT, pas prometteur : s'il tenait
+            # vraiment, quelqu'un l'aurait déjà refermé en l'exploitant.
+            opportunite.age_spread_sec = duree_spread.enregistrer(symbol, ex_achat, ex_vente)
             opportunites.append(opportunite)
 
     return opportunites
@@ -1203,6 +1214,15 @@ async def main():
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(verif_retraits.boucle_rafraichissement()))
+    if LISTINGS_ACTIF:
+        # Nouvelles cotations : les écarts y sont larges et parfois réels,
+        # contrairement à ceux qui traînent depuis des heures
+        tasks.append(asyncio.create_task(
+            nouveaux_listings.boucle(LISTINGS_INTERVALLE_SEC)))
+    if PERP_ACTIF:
+        # Arbitrage spot-futures : les deux jambes sur la MÊME plateforme,
+        # donc aucun transfert — contourne le problème des retraits fermés
+        tasks.append(asyncio.create_task(arbitrage_perpetuel.boucle(prix_live)))
 
     # Positions en attente : la surveillance a besoin du cache de prix
     # WebSocket pour savoir quand une position repasse positive. On le lui
