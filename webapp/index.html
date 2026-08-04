@@ -358,6 +358,14 @@ h2.view-title{font-size:18px;font-weight:800;margin:4px 0 0;}
       <div class="panel-body row-list" id="topPairesList"><div class="empty-note">—</div></div>
     </details>
 
+    <details class="panel" data-target="retraitsList">
+      <summary>Circulation des cryptos (retraits et dépôts)</summary>
+      <div class="panel-body">
+        <input type="text" id="retraitsSearch" placeholder="Filtrer par symbole…" oninput="filtrerRetraits()">
+        <div class="row-list" id="retraitsList"><div class="empty-note">—</div></div>
+      </div>
+    </details>
+
     <details class="panel" data-target="historiqueList">
       <summary>Historique CSV</summary>
       <div class="panel-body row-list" id="historiqueList"><div class="empty-note">—</div></div>
@@ -626,6 +634,7 @@ var panelLoaders = {
   soldesDetail: loadSoldes,
   transfertsList: loadTransferts,
   blacklistList: loadBlacklist,
+  retraitsList: loadRetraits,
   historiqueList: loadHistorique,
   mlStats: loadMlStats,
   perfDetail: loadPerfDetail,
@@ -899,6 +908,60 @@ function loadTopPaires(){
         '<div class="row-main row-symbole">' + esc(o.symbole) + '</div><div class="row-value">' + fmtNum(o.nb_exchanges) + ' exch.</div></div>';
     }).join('');
   }).catch(function(){ qs('topPairesList').innerHTML = '<div class="empty-note">—</div>'; });
+}
+var _retraitsCache = [];
+function loadRetraits(){
+  apiFetch('/api/retraits').then(function(data){
+    var box = qs('retraitsList');
+    if(!data || !data.pret){
+      box.innerHTML = '<div class="empty-note">' + esc((data && data.message) || 'Données indisponibles') + '</div>';
+      return;
+    }
+    _retraitsCache = data.cryptos || [];
+    renderRetraits();
+  }).catch(function(){ qs('retraitsList').innerHTML = '<div class="empty-note">—</div>'; });
+}
+function filtrerRetraits(){ renderRetraits(); }
+function renderRetraits(){
+  var box = qs('retraitsList');
+  var filtre = (qs('retraitsSearch') && qs('retraitsSearch').value || '').trim().toUpperCase();
+  var lignes = _retraitsCache.filter(function(c){ return !filtre || c.token.indexOf(filtre) !== -1; });
+  if(!lignes.length){ box.innerHTML = '<div class="empty-note">—</div>'; return; }
+
+  // Les cryptos qui circulent d'abord : ce sont les seules exploitables
+  lignes.sort(function(a,b){ return (b.nb_paires_possibles||0) - (a.nb_paires_possibles||0); });
+
+  box.innerHTML = lignes.slice(0,60).map(function(c){
+    var ex = c.exchanges || {};
+    var cells = Object.keys(ex).sort().map(function(nom){
+      var i = ex[nom], r = i.retrait, d = i.depot;
+      var couleur = (r === 'ouvert') ? 'var(--green)'
+                  : (r === 'ferme') ? 'var(--red)'
+                  : (r === 'absent') ? 'var(--muted)' : 'var(--amber)';
+      var marque = (r === 'ouvert') ? '↑' : (r === 'ferme') ? '×' : (r === 'absent') ? '·' : '?';
+      var marqueD = (d === 'ouvert') ? '↓' : (d === 'ferme') ? '×' : (d === 'absent') ? '·' : '?';
+      var titre = nom + ' — retrait: ' + r + ', dépôt: ' + d
+                + (i.reseaux_retrait && i.reseaux_retrait.length ? ' (' + i.reseaux_retrait.join(', ') + ')' : '')
+                + (i.raison ? ' — ' + i.raison : '');
+      return '<span title="' + esc(titre) + '" style="color:' + couleur + ';font-family:var(--font-mono);font-size:11px;margin-right:10px;white-space:nowrap;">'
+           + esc(nom) + ' ' + marque + marqueD + '</span>';
+    }).join('');
+
+    var routes = (c.paires_possibles || []).slice(0,4).map(function(p){
+      return esc(p.de) + '→' + esc(p.vers) + ' (' + esc(p.reseaux.join(',')) + ')';
+    }).join(' · ');
+
+    var badge = c.circulable
+      ? '<span style="color:var(--green);">' + c.nb_paires_possibles + ' trajet(s)</span>'
+      : '<span style="color:var(--red);">ne circule pas</span>';
+
+    return '<div class="list-row"><div class="row-main">'
+         + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+         + '<strong>' + esc(c.token) + '</strong>' + badge + '</div>'
+         + '<div style="margin-top:4px;">' + cells + '</div>'
+         + (routes ? '<div style="margin-top:4px;font-size:11px;color:var(--muted);font-family:var(--font-mono);">' + routes + '</div>' : '')
+         + '</div></div>';
+  }).join('');
 }
 function loadHistorique(){
   apiFetch('/api/historique').then(function(rows){
