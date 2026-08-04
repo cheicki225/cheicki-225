@@ -348,7 +348,14 @@ LISTINGS_INTERVALLE_SEC = 1800
 # LA MÊME plateforme, donc AUCUN transfert entre exchanges — ni retrait
 # fermé, ni délai blockchain, ni frais de retrait fixes. C'est précisément
 # le mur contre lequel bute l'arbitrage inter-plateformes classique.
-PERP_ACTIF = True
+PERP_ACTIF = False
+# Désactivé le 04/08 à la demande : stratégie jugée trop complexe pour
+# l'instant. Le module reste présent dans le dépôt mais totalement inerte —
+# aucune boucle lancée, aucun appel réseau, aucun message Telegram.
+# ⚠️ Le fichier arbitrage_perpetuel.py doit malgré tout exister sur le dépôt :
+# bot_fusionne_v1.py l'importe en haut du fichier, et un import manquant
+# fait planter le bot au démarrage (ModuleNotFoundError).
+# Repasse à True quand tu voudras le réactiver.
 
 # Base minimale (perp au-dessus du spot, en %) pour signaler un arbitrage
 # de convergence. Le coût d'un cycle complet est d'environ 0.40% à 0.80%
