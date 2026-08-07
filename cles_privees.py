@@ -235,13 +235,21 @@ async def recuperer_okx() -> dict | None:
 # MEXC — même schéma de signature que Binance
 # ============================================================
 async def recuperer_mexc() -> dict | None:
+    """
+    ⚠️ Corrigé le 07/08 après un HTTP 400 réel en production : contrairement
+    à Binance (qui accepte l'absence de recvWindow, 5000ms par défaut), MEXC
+    exige ce paramètre explicitement dans la requête ET dans la chaîne
+    signée — sans lui, l'API répond {"code":700003,"msg":"Timestamp for
+    this request is outside of the recvWindow."} même avec un timestamp
+    parfaitement à l'heure.
+    """
     cle_secret = _lire_cle("mexc")
     if cle_secret is None:
         return None
     api_key, api_secret, _ = cle_secret
 
     horodatage = int(time.time() * 1000)
-    requete = f"timestamp={horodatage}"
+    requete = f"recvWindow=5000&timestamp={horodatage}"
     signature = hmac.new(api_secret.encode(), requete.encode(), hashlib.sha256).hexdigest()
     url = f"https://api.mexc.com/api/v3/capital/config/getall?{requete}&signature={signature}"
 
