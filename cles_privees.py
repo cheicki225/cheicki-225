@@ -76,6 +76,17 @@ def _normaliser_reseau(nom) -> str:
 # ============================================================
 # BINANCE — HMAC-SHA256 sur la query string
 # ============================================================
+async def _corps_erreur(resp) -> str:
+    """Lit le corps d'une réponse en échec pour diagnostiquer précisément
+    (le corps d'erreur d'une plateforme ne contient jamais de clé/secret,
+    seulement un code et un message — sûr à journaliser en clair)."""
+    try:
+        texte = await resp.text()
+        return texte[:200]
+    except Exception:
+        return "(corps illisible)"
+
+
 async def recuperer_binance() -> dict | None:
     cle_secret = _lire_cle("binance")
     if cle_secret is None:
@@ -93,7 +104,7 @@ async def recuperer_binance() -> dict | None:
                 url, headers={"X-MBX-APIKEY": api_key}, timeout=TIMEOUT
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"binance (signé) : statut HTTP {resp.status}")
+                    log.warning(f"binance (signé) : statut HTTP {resp.status} — {await _corps_erreur(resp)}")
                     return None
                 data = await resp.json(content_type=None)
     except Exception as e:
@@ -130,7 +141,10 @@ async def recuperer_bybit() -> dict | None:
     api_key, api_secret, _ = cle_secret
 
     horodatage = str(int(time.time() * 1000))
-    fenetre = "5000"
+    # Fenêtre élargie à 20s (au lieu de 5s) : sur un service cloud comme
+    # Railway, une dérive d'horloge de quelques secondes est possible et
+    # ferait échouer la signature avec une fenêtre trop stricte.
+    fenetre = "20000"
     # Bybit v5 : signature = HMAC(timestamp + api_key + recv_window + query_string)
     chaine_a_signer = horodatage + api_key + fenetre
     signature = hmac.new(api_secret.encode(), chaine_a_signer.encode(), hashlib.sha256).hexdigest()
@@ -149,9 +163,17 @@ async def recuperer_bybit() -> dict | None:
                 headers=entetes, timeout=TIMEOUT,
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"bybit (signé) : statut HTTP {resp.status}")
+                    log.warning(f"bybit (signé) : statut HTTP {resp.status} — {await _corps_erreur(resp)}")
                     return None
                 data = await resp.json(content_type=None)
+                # Bybit renvoie 200 même en cas d'erreur applicative
+                # (permission refusée, etc.) — le vrai code est dans retCode
+                if isinstance(data, dict) and data.get("retCode") not in (0, None):
+                    log.warning(
+                        f"bybit (signé) : retCode={data.get('retCode')} — "
+                        f"{data.get('retMsg', '(sans message)')}"
+                    )
+                    return None
     except Exception as e:
         log.warning(f"bybit (signé) : échec ({e})")
         return None
@@ -208,7 +230,7 @@ async def recuperer_okx() -> dict | None:
                 f"https://www.okx.com{chemin}", headers=entetes, timeout=TIMEOUT,
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"okx (signé) : statut HTTP {resp.status}")
+                    log.warning(f"okx (signé) : statut HTTP {resp.status} — {await _corps_erreur(resp)}")
                     return None
                 data = await resp.json(content_type=None)
     except Exception as e:
@@ -249,7 +271,9 @@ async def recuperer_mexc() -> dict | None:
     api_key, api_secret, _ = cle_secret
 
     horodatage = int(time.time() * 1000)
-    requete = f"recvWindow=5000&timestamp={horodatage}"
+    # Fenêtre élargie à 20s pour la même raison que Bybit : tolérer une
+    # dérive d'horloge du service cloud sans faire échouer la signature.
+    requete = f"recvWindow=20000&timestamp={horodatage}"
     signature = hmac.new(api_secret.encode(), requete.encode(), hashlib.sha256).hexdigest()
     url = f"https://api.mexc.com/api/v3/capital/config/getall?{requete}&signature={signature}"
 
@@ -259,7 +283,7 @@ async def recuperer_mexc() -> dict | None:
                 url, headers={"X-MEXC-APIKEY": api_key}, timeout=TIMEOUT
             ) as resp:
                 if resp.status != 200:
-                    log.warning(f"mexc (signé) : statut HTTP {resp.status}")
+                    log.warning(f"mexc (signé) : statut HTTP {resp.status} — {await _corps_erreur(resp)}")
                     return None
                 data = await resp.json(content_type=None)
     except Exception as e:
