@@ -1411,6 +1411,12 @@ function openSpreadSocket(){
       });
       /* Réordonnancement en direct à chaque nouveau spread reçu. */
       rendreListeCryptos();
+    } else if(msg.type === 'spread_retire' && msg.data && msg.data.symbole){
+      /* La crypto n'est plus circulable (retrait/dépôt fermé entre-temps)
+         — retrait explicite plutôt qu'un simple arrêt des mises à jour,
+         pour ne jamais laisser une donnée périmée affichée comme "dispo". */
+      delete cryptoData[msg.data.symbole];
+      rendreListeCryptos();
     }
   };
 }
