@@ -28,6 +28,7 @@ import api_server
 import suivi_opportunite
 import positions_attente
 import verif_retraits
+import classement_exchanges
 import arbitrage_perpetuel
 import duree_spread
 import nouveaux_listings
@@ -394,6 +395,153 @@ class BitgetWS(ExchangeWebSocket):
                     sub_msg = await self.get_subscribe_message()
                     await ws.send(json.dumps(sub_msg))
                     self.log.info(f"Abonnement envoyé : {sub_msg}")
+                    ping_task = asyncio.create_task(ping_loop(ws))
+                    try:
+                        async for message in ws:
+                            if await self.handle_ping(ws, message):
+                                continue
+                            parsed = self.parse_message(message)
+                            if parsed:
+                                symbol, bid, ask = parsed
+                                ancien = prix_live[self.name].get(symbol)
+                                prix_a_change = ancien is None or ancien["bid"] != bid or ancien["ask"] != ask
+                                prix_live[self.name][symbol] = {
+                                    "bid": bid, "ask": ask, "timestamp": time.time(),
+                                }
+                                if prix_a_change:
+                                    asyncio.create_task(verifier_opportunites_symbole(symbol))
+                                    if symbol in TRIANGLE_LEG_SYMBOLS:
+                                        asyncio.create_task(verifier_triangles_exchange(self.name))
+                    finally:
+                        ping_task.cancel()
+            except websockets.exceptions.ConnectionClosed as e:
+                self.log.warning(f"Connexion fermée : {e}")
+            except Exception as e:
+                self.log.error(f"Erreur : {e}")
+            self.log.info(f"Reconnexion dans {reconnect_delay}s...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_delay)
+
+
+class CoinexWS(ExchangeWebSocket):
+    """
+    CoinEx v2 — ajouté le 04/08.
+
+    POURQUOI CETTE PLATEFORME
+    Mesure du 04/08 sur données publiques : coinex arrive PREMIER du
+    classement de circulation avec 97.7% de retraits ouverts et 74.3% de
+    dépôts — le seul à ne pas s'effondrer côté dépôt. Le trajet
+    bitget->coinex laisse passer ~65% des tokens contre ~36% pour le
+    meilleur trajet entre les 3 plateformes historiques.
+
+    ⚠️ PARTICULARITÉ : COMPRESSION GZIP
+    Contrairement aux 6 autres, CoinEx peut envoyer ses trames compressées
+    en gzip (trames binaires). C'est exactement le genre de piège qui avait
+    fait abandonner MEXC (Protobuf). Ici c'est gérable : parse_message
+    accepte str ET bytes, et décompresse si nécessaire. Si la trame binaire
+    n'est pas du gzip, on l'ignore proprement plutôt que de planter.
+
+    ⚠️ NON TESTÉ CONTRE LE VRAI SERVEUR — l'environnement de développement
+    n'a pas accès aux plateformes crypto. Surveille les logs au premier
+    démarrage : si « coinex » reste à 0 paire active, c'est ici qu'il faut
+    regarder.
+    """
+    name = "coinex"
+
+    # CoinEx limite la taille des messages d'abonnement. On découpe par
+    # prudence, comme KuCoin (bug #4 : au-delà de sa limite, KuCoin
+    # rejetait SILENCIEUSEMENT le message entier, 0 paire active).
+    MAX_SYMBOLES_PAR_MESSAGE = 100
+
+    async def get_url(self) -> str:
+        return "wss://socket.coinex.com/v2/spot"
+
+    async def get_subscribe_messages(self) -> list[dict]:
+        messages = []
+        for i in range(0, len(self.symbols), self.MAX_SYMBOLES_PAR_MESSAGE):
+            lot = self.symbols[i:i + self.MAX_SYMBOLES_PAR_MESSAGE]
+            messages.append({
+                "method": "bbo.subscribe",
+                "params": {"market_list": lot},
+                "id": i + 1,
+            })
+        return messages
+
+    @staticmethod
+    def _decoder(raw_message):
+        """Renvoie le texte JSON, en décompressant si la trame est binaire."""
+        if isinstance(raw_message, (bytes, bytearray)):
+            import gzip
+            try:
+                return gzip.decompress(raw_message).decode("utf-8")
+            except (OSError, EOFError, UnicodeDecodeError):
+                try:
+                    return raw_message.decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+        return raw_message
+
+    async def handle_ping(self, ws, raw_message) -> bool:
+        texte = self._decoder(raw_message)
+        if not texte:
+            return True  # trame illisible : on l'ignore sans la parser
+        try:
+            data = json.loads(texte)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if data.get("method") == "server.ping":
+            try:
+                await ws.send(json.dumps({"method": "server.pong", "params": {}, "id": data.get("id")}))
+            except Exception:
+                pass
+            return True
+        return False
+
+    def parse_message(self, raw_message):
+        texte = self._decoder(raw_message)
+        if not texte:
+            return None
+        try:
+            data = json.loads(texte)
+            if data.get("method") != "bbo.update":
+                return None
+            d = data.get("data") or {}
+            marche = d.get("market")
+            bid, ask = d.get("best_bid_price"), d.get("best_ask_price")
+            if marche and bid and ask:
+                return marche, float(bid), float(ask)
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+    async def run(self):
+        """
+        CoinEx exige un ping applicatif périodique, comme Bitget et Bybit,
+        sinon le serveur ferme la connexion après quelques minutes.
+        """
+        async def ping_loop(ws):
+            identifiant = 10_000
+            while True:
+                await asyncio.sleep(25)
+                identifiant += 1
+                try:
+                    await ws.send(json.dumps({"method": "server.ping", "params": {}, "id": identifiant}))
+                except Exception:
+                    return
+
+        reconnect_delay = 1
+        max_delay = 30
+        while True:
+            try:
+                url = await self.get_url()
+                self.log.info("Tentative de connexion...")
+                async with websockets.connect(url) as ws:
+                    self.log.info("✅ Connecté")
+                    reconnect_delay = 1
+                    for sub_msg in await self.get_subscribe_messages():
+                        await ws.send(json.dumps(sub_msg))
+                        self.log.info(f"Abonnement envoyé : {str(sub_msg)[:200]}")
+                        await asyncio.sleep(0.3)
                     ping_task = asyncio.create_task(ping_loop(ws))
                     try:
                         async for message in ws:
@@ -1186,6 +1334,10 @@ async def main():
         + repartir_en_connexions(KuCoinWS, [vers_format_tiret(s) for s in symboles_par_exchange["kucoin"]], NB_CONNEXIONS_PAR_EXCHANGE)
         + repartir_en_connexions(BitgetWS, symboles_par_exchange["bitget"], NB_CONNEXIONS_PAR_EXCHANGE)
         + repartir_en_connexions(GateioWS, [vers_format_underscore(s) for s in symboles_par_exchange["gateio"]], NB_CONNEXIONS_PAR_EXCHANGE)
+        # CoinEx utilise le format sans séparateur (BTCUSDT), comme Binance.
+        # .get() plutôt qu'un accès direct : si la découverte coinex échoue,
+        # le bot démarre quand même avec les 6 autres plateformes.
+        + repartir_en_connexions(CoinexWS, symboles_par_exchange.get("coinex", []), NB_CONNEXIONS_PAR_EXCHANGE)
     )
 
     triangles_par_exchange = {
@@ -1214,6 +1366,10 @@ async def main():
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(verif_retraits.boucle_rafraichissement()))
+    # Classement des plateformes candidates (mesure, ne branche rien
+    # automatiquement sur les WebSockets) — consultable via /classement
+    # sur Telegram ou l'endpoint /api/classement
+    tasks.append(asyncio.create_task(classement_exchanges.boucle_rafraichissement()))
     if LISTINGS_ACTIF:
         # Nouvelles cotations : les écarts y sont larges et parfois réels,
         # contrairement à ceux qui traînent depuis des heures
