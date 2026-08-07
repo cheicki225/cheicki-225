@@ -560,6 +560,15 @@ async def demarrer_bot_telegram():
                         health_manager.blacklister_manuellement(symbole, "Exclu manuellement via Telegram")
                         await envoyer_menu(chat_id, f"🚫 <b>{symbole}</b> blacklisté manuellement.")
 
+                    elif texte == "/classement":
+                        # Classement des plateformes candidates sur la
+                        # circulation des cryptos — ajouté le 04/08. Lecture
+                        # seule du dernier résultat en mémoire : aucun appel
+                        # réseau ici, donc réponse immédiate même si le
+                        # prochain rafraîchissement (toutes les 6h) est loin.
+                        import classement_exchanges
+                        await envoyer_menu(chat_id, classement_exchanges.resume_telegram())
+
                     elif chat_id in _attente_saisie:
                         cible = _attente_saisie.pop(chat_id)
 

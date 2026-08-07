@@ -53,6 +53,7 @@ RECUPERATEURS = {
     "kucoin": symbol_discovery.paires_kucoin,
     "bitget": symbol_discovery.paires_bitget,
     "gateio": symbol_discovery.paires_gateio,
+    "coinex": symbol_discovery.paires_coinex,
 }
 
 

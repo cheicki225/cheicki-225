@@ -74,6 +74,25 @@ COLONNES = [
 
 TIMEOUT = aiohttp.ClientTimeout(total=20)
 
+
+def _session_avec_dns_force() -> aiohttp.ClientSession:
+    """
+    Même contournement que le reste du projet : sur Windows, pycares/aiodns
+    n'arrive parfois pas à lire la config DNS système (« Could not contact
+    DNS servers »). Jamais forcé hors Windows — c'est ce qui cassait le bot
+    sur Railway.
+    """
+    import platform
+    if platform.system() == "Windows":
+        try:
+            from aiohttp.resolver import AsyncResolver
+            resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
+            connector = aiohttp.TCPConnector(resolver=resolver)
+            return aiohttp.ClientSession(connector=connector)
+        except Exception:
+            pass
+    return aiohttp.ClientSession()
+
 # Dernier instantané par plateforme : {symbole: {...}}
 _perp_live: dict[str, dict] = {}
 _derniere_maj: float = 0.0
@@ -245,7 +264,7 @@ async def _telecharger_un(session, exchange: str, url: str, parser):
 async def rafraichir():
     """Recharge prix perpétuels et funding pour toutes les plateformes."""
     global _perp_live, _derniere_maj
-    async with aiohttp.ClientSession() as session:
+    async with _session_avec_dns_force() as session:
         resultats = await asyncio.gather(*(
             _telecharger_un(session, ex, url, parser)
             for ex, (url, parser) in SOURCES.items()

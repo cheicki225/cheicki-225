@@ -375,6 +375,23 @@ async def handler_ml_stats(request):
     })
 
 
+async def handler_classement_exchanges(request):
+    """
+    Résultat du dernier classement des plateformes candidates (retrait x
+    dépôt + accessibilité web). Purement en lecture depuis le cache mémoire
+    du module — aucun appel réseau déclenché par cette requête, le
+    rafraîchissement se fait en tâche de fond toutes les 6h.
+    """
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import classement_exchanges
+    resultat = classement_exchanges.dernier_resultat()
+    if resultat is None:
+        return _reponse_json({"pret": False, "message": "Premier calcul pas encore terminé"})
+    return _reponse_json({"pret": True, **resultat})
+
+
 async def handler_retraits(request):
     """
     Matrice de circulation : pour chaque crypto suivie, où le retrait et le
@@ -671,6 +688,7 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/historique", handler_historique)
     app.router.add_get("/api/ml_stats", handler_ml_stats)
     app.router.add_get("/api/retraits", handler_retraits)
+    app.router.add_get("/api/classement", handler_classement_exchanges)
     app.router.add_get("/api/transferts", handler_transferts)
     app.router.add_get("/api/erreurs", handler_erreurs)
     app.router.add_get("/api/config", handler_config)

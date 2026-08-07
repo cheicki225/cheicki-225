@@ -136,6 +136,7 @@ VOLUME_MIN_USDT = 0
 FRAIS_TRADING_PCT = {
     "binance": 0.10, "bybit": 0.10, "okx": 0.10, "kucoin": 0.10, "bitget": 0.10,
     "gateio": 0.20,  # confirmé : 2x plus cher que les autres au tarif de base (sans token GT/VIP)
+    "coinex": 0.20,  # ajouté le 04/08 — tarif de base sans token CET ni palier VIP
 }
 
 

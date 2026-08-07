@@ -180,6 +180,36 @@ async def paires_bitget() -> dict:
     return volumes
 
 
+async def paires_coinex() -> dict:
+    """
+    CoinEx v2 — ajouté le 04/08.
+    Les marchés y sont nommés sans séparateur (BTCUSDT), comme Binance.
+    """
+    async with _session_avec_dns_force() as session:
+        async with session.get("https://api.coinex.com/v2/spot/market") as resp:
+            info = await resp.json(content_type=None)
+        async with session.get("https://api.coinex.com/v2/spot/ticker") as resp:
+            tickers = await resp.json(content_type=None)
+
+    valides = {
+        m["market"] for m in (info.get("data") or [])
+        if isinstance(m, dict) and str(m.get("quote_ccy", "")).upper() == "USDT"
+    }
+    volumes = {}
+    for t in (tickers.get("data") or []):
+        if not isinstance(t, dict):
+            continue
+        marche = t.get("market")
+        if marche not in valides:
+            continue
+        # `value` est le volume 24h exprimé en devise de cotation (USDT)
+        try:
+            volumes[marche] = float(t.get("value") or 0)
+        except (TypeError, ValueError):
+            volumes[marche] = 0.0
+    return volumes
+
+
 async def paires_gateio() -> dict:
     """
     Gate.io reste en JSON classique côté WebSocket (pas de protobuf comme
@@ -214,10 +244,11 @@ async def calculer_intersection(exclure: set[str] | None = None) -> list[str]:
 
     resultats = await asyncio.gather(
         paires_binance(), paires_bybit(), paires_okx(), paires_kucoin(), paires_bitget(), paires_gateio(),
+        paires_coinex(),
         return_exceptions=True,
     )
 
-    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio"]
+    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex"]
     ensembles = []
     for nom, r in zip(noms, resultats):
         if isinstance(r, Exception):
@@ -263,10 +294,11 @@ async def calculer_disponibilite_min(
 
     resultats = await asyncio.gather(
         paires_binance(), paires_bybit(), paires_okx(), paires_kucoin(), paires_bitget(), paires_gateio(),
+        paires_coinex(),
         return_exceptions=True,
     )
 
-    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio"]
+    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex"]
     par_exchange: dict[str, dict] = {}
     for nom, r in zip(noms, resultats):
         if isinstance(r, Exception):
