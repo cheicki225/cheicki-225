@@ -358,6 +358,18 @@ h2.view-title{font-size:18px;font-weight:800;margin:4px 0 0;}
       <div class="panel-body row-list" id="topPairesList"><div class="empty-note">—</div></div>
     </details>
 
+    <details class="panel" data-target="selectionList">
+      <summary>Plateformes actives pour l'arbitrage</summary>
+      <div class="panel-body">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+          <button id="btnModeManuel" onclick="definirModeSelection('manuel')" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">Manuel</button>
+          <button id="btnModeAuto" onclick="definirModeSelection('auto')" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;">Auto</button>
+          <span id="seuilSelectionInfo" style="font-size:12px;color:var(--muted);"></span>
+        </div>
+        <div class="row-list" id="selectionList"><div class="empty-note">—</div></div>
+      </div>
+    </details>
+
     <details class="panel" data-target="retraitsList">
       <summary>Circulation des cryptos (retraits et dépôts)</summary>
       <div class="panel-body">
@@ -963,6 +975,63 @@ function renderRetraits(){
          + '</div></div>';
   }).join('');
 }
+var _selectionCache = null;
+function loadSelection(){
+  apiFetch('/api/selection').then(function(data){
+    _selectionCache = data;
+    renderSelection();
+  }).catch(function(){ qs('selectionList').innerHTML = '<div class="empty-note">—</div>'; });
+}
+
+function renderSelection(){
+  if(!_selectionCache) return;
+  var d = _selectionCache;
+  var enAuto = d.mode === 'auto';
+
+  qs('btnModeManuel').style.opacity = enAuto ? '0.5' : '1';
+  qs('btnModeAuto').style.opacity = enAuto ? '1' : '0.5';
+  qs('seuilSelectionInfo').textContent = enAuto
+    ? 'Sélection automatique, score ≥ ' + d.seuil_score + ', max ' + (d.max_actives_auto || 12) + ' plateformes'
+    : 'Sélection manuelle';
+
+  var lignes = (d.exchanges || []).slice().sort(function(a, b){
+    return (b.score || -1) - (a.score || -1);
+  });
+
+  qs('selectionList').innerHTML = lignes.map(function(ex){
+    var scoreTxt = (ex.score === null || ex.score === undefined) ? 'non mesuré' : ex.score.toFixed(1);
+    var couleur = ex.actif ? 'var(--green)' : 'var(--muted)';
+    var boutonTxt = ex.actif ? 'Désactiver' : 'Activer';
+    // En mode auto, la sélection est recalculée automatiquement — le bouton
+    // manuel reste utilisable mais bascule le mode sur "manuel" (comportement
+    // du backend), donc on le signale clairement plutôt que de le cacher.
+    return '<div class="list-row"><div class="row-main">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">'
+      + '<span style="color:' + couleur + ';font-weight:600;">' + esc(ex.nom) + '</span>'
+      + '<span style="font-size:12px;color:var(--muted);">score ' + scoreTxt + '</span>'
+      + '<button onclick="basculerExchange(\'' + ex.nom + '\',' + (ex.actif ? 'true' : 'false') + ')" '
+      + 'style="padding:3px 10px;border-radius:6px;border:1px solid var(--border,#333);background:transparent;color:inherit;cursor:pointer;font-size:12px;">'
+      + boutonTxt + '</button>'
+      + '</div></div></div>';
+  }).join('');
+}
+
+function basculerExchange(nom, actifActuellement){
+  var action = actifActuellement ? 'desactiver' : 'activer';
+  apiFetch('/api/selection/toggle', { method: 'POST', body: { nom: nom, action: action } })
+    .then(function(res){ _selectionCache = res.etat ? Object.assign({}, _selectionCache, { mode: res.etat.mode, seuil_score: res.etat.seuil_score }) : _selectionCache;
+      // Recharge l'état complet (avec scores) plutôt que de reconstruire à la main
+      loadSelection();
+    })
+    .catch(function(e){ alert('Action refusée : ' + e.message); });
+}
+
+function definirModeSelection(mode){
+  apiFetch('/api/selection/mode', { method: 'POST', body: { mode: mode, seuil_score: 50 } })
+    .then(function(){ loadSelection(); })
+    .catch(function(e){ alert('Erreur : ' + e.message); });
+}
+
 function loadHistorique(){
   apiFetch('/api/historique').then(function(rows){
     rows = rows || [];
