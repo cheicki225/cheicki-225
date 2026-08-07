@@ -41,25 +41,88 @@ log = logging.getLogger("verif_retraits")
 
 TIMEOUT = aiohttp.ClientTimeout(total=25)
 
+
+def _session_avec_dns_force() -> aiohttp.ClientSession:
+    """
+    Même contournement que symbol_discovery / orderbook_depth / frais_retrait.
+
+    Sur Windows, pycares/aiodns échoue parfois à lire la configuration DNS
+    du système (bug connu) — d'où « Could not contact DNS servers » alors
+    que la connexion Internet fonctionne. On force donc explicitement les
+    DNS Google. Sur Linux/Mac (déploiement Railway), ce forçage peut
+    lui-même échouer selon la version de pycares installée ('Channel'
+    object has no attribute 'gethostbyname') : on retombe alors sur le
+    résolveur par défaut, qui fonctionne très bien sur ces systèmes.
+
+    ⚠️ Ne JAMAIS forcer ce résolveur en dehors de Windows : c'est
+    exactement ce qui cassait le bot sur Railway.
+    """
+    import platform
+    if platform.system() == "Windows":
+        try:
+            from aiohttp.resolver import AsyncResolver
+            resolver = AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
+            connector = aiohttp.TCPConnector(resolver=resolver)
+            return aiohttp.ClientSession(connector=connector)
+        except Exception:
+            pass
+    return aiohttp.ClientSession()
+
 # Plateformes dont l'état des retraits n'est PAS récupérable sans clé API.
 # Marquées "inconnu" — jamais supposées ouvertes, ce serait le pire défaut
 # possible pour un outil censé détecter des blocages.
-EXCHANGES_SANS_DONNEES_PUBLIQUES = ("binance", "bybit", "okx")
+EXCHANGES_SANS_DONNEES_PUBLIQUES_BASE = ("binance", "bybit", "okx")
+# Plateformes retirées de cette liste au moment du rafraîchissement, si une
+# clé API en lecture seule est configurée ET que la requête signée a réussi
+# (voir cles_privees.py). EXCHANGES_SANS_DONNEES_PUBLIQUES reste donc un
+# tuple normal, lisible partout comme avant — juste recalculé à chaque
+# rafraîchissement plutôt que figé une fois pour toutes.
+EXCHANGES_SANS_DONNEES_PUBLIQUES = EXCHANGES_SANS_DONNEES_PUBLIQUES_BASE
 
 
 def _normaliser_reseau(nom) -> str:
-    """Aligne les noms de réseaux entre plateformes (TRC20/TRX/Tron -> TRX...)."""
+    """
+    Aligne les noms de réseaux entre plateformes.
+
+    ⚠️ Corrigé le 04/08 après mesure sur données réelles : les plateformes
+    nomment le MÊME réseau de façons très différentes, et sans alignement le
+    filtre conclut « aucun réseau commun » alors que le transfert est
+    possible. Exemples relevés sur les vraies API :
+        Arbitrum -> bitget "ARBITRUMONE", gateio "ARBEVM", kucoin "ARBITRUM"
+        Base     -> gateio "BASEEVM", bitget/kucoin "BASE"
+    ARBITRUMONE est le réseau n°1 de bitget (738 tokens) : l'oubli écartait
+    donc à tort une grande partie de ses trajets possibles.
+    """
     if not nom:
         return "?"
     n = str(nom).strip().upper()
+    for caractere in ("-", "_", " ", "(", ")", ".", "/"):
+        n = n.replace(caractere, "")
+
+    # Alias explicites d'abord (les cas qu'aucune règle générale ne couvre)
     equivalences = {
-        "TRC20": "TRX", "TRON": "TRX", "TRC-20": "TRX",
-        "ERC20": "ETH", "ERC-20": "ETH", "ETHEREUM": "ETH",
-        "BEP20": "BSC", "BEP-20": "BSC", "BSC(BEP20)": "BSC",
-        "BINANCE SMART CHAIN": "BSC", "BNB SMART CHAIN": "BSC",
-        "SOLANA": "SOL", "POLYGON": "MATIC", "ARBITRUM ONE": "ARBITRUM",
-        "AVALANCHE C-CHAIN": "AVAX_CCHAIN", "AVAX C-CHAIN": "AVAX_CCHAIN",
+        "TRC20": "TRX", "TRON": "TRX",
+        "ERC20": "ETH", "ETHEREUM": "ETH", "ETHERC20": "ETH",
+        "BEP20": "BSC", "BEP2": "BNB", "BSCBEP20": "BSC",
+        "BINANCESMARTCHAIN": "BSC", "BNBSMARTCHAIN": "BSC", "BNBCHAIN": "BSC",
+        "SOLANA": "SOL", "SPL": "SOL",
+        "POLYGON": "MATIC", "POL": "MATIC",
+        "ARBITRUMONE": "ARBITRUM", "ARB": "ARBITRUM", "ARBITRUMNOVA": "ARBITRUMNOVA",
+        "OPTIMISM": "OP", "OPTIMISMETH": "OP",
+        "AVALANCHECCHAIN": "AVAXC", "AVAXCCHAIN": "AVAXC", "CCHAIN": "AVAXC",
+        "AVALANCHEXCHAIN": "AVAXX",
     }
+    if n in equivalences:
+        return equivalences[n]
+
+    # Suffixes purement décoratifs ajoutés par certaines plateformes
+    # (gateio suffixe volontiers "EVM" : ARBEVM, BASEEVM, OPEVM...)
+    for suffixe in ("EVM", "CHAIN", "NETWORK", "MAINNET"):
+        if n.endswith(suffixe) and len(n) > len(suffixe) + 1:
+            n = n[: -len(suffixe)]
+            break
+
+    # Nouvelle passe d'alias après retrait du suffixe (ARBEVM -> ARB -> ARBITRUM)
     return equivalences.get(n, n)
 
 
@@ -140,10 +203,45 @@ def _parser_gateio(data, token: str) -> dict | None:
     return {"trouve": True, "reseaux": reseaux} if trouve else None
 
 
+def _parser_coinex(data, token: str) -> dict | None:
+    """
+    https://api.coinex.com/v2/assets/all-deposit-withdraw-config
+
+    Ajouté le 04/08 en même temps que l'intégration de coinex : sans ce
+    parser, le filtre de retraits aurait classé toutes les paires coinex
+    en « inconnu » et le mode strict les aurait toutes écartées.
+    """
+    if not isinstance(data, dict):
+        return None
+    for entree in data.get("data") or []:
+        if not isinstance(entree, dict):
+            continue
+        actif = entree.get("asset") if isinstance(entree.get("asset"), dict) else {}
+        nom = str(actif.get("ccy") or entree.get("ccy", "")).upper()
+        if nom != token:
+            continue
+        reseaux = {}
+        for chaine in entree.get("chains") or []:
+            if not isinstance(chaine, dict):
+                continue
+            reseaux[_normaliser_reseau(chaine.get("chain"))] = {
+                "retrait_ouvert": _vrai_sauf_si_faux(chaine.get("withdraw_enabled")),
+                "depot_ouvert": _vrai_sauf_si_faux(chaine.get("deposit_enabled")),
+            }
+        if not reseaux:
+            reseaux = {"?": {
+                "retrait_ouvert": _vrai_sauf_si_faux(actif.get("withdraw_enabled")),
+                "depot_ouvert": _vrai_sauf_si_faux(actif.get("deposit_enabled")),
+            }}
+        return {"trouve": True, "reseaux": reseaux}
+    return None
+
+
 SOURCES = {
     "kucoin": ("https://api.kucoin.com/api/v3/currencies", _parser_kucoin),
     "bitget": ("https://api.bitget.com/api/v2/spot/public/coins", _parser_bitget),
     "gateio": ("https://api.gateio.ws/api/v4/spot/currencies", _parser_gateio),
+    "coinex": ("https://api.coinex.com/v2/assets/all-deposit-withdraw-config", _parser_coinex),
 }
 
 
@@ -156,7 +254,7 @@ async def _telecharger_tout() -> dict:
 
     async def _un(exchange, url):
         try:
-            async with aiohttp.ClientSession() as session:
+            async with _session_avec_dns_force() as session:
                 async with session.get(url, timeout=TIMEOUT) as resp:
                     if resp.status != 200:
                         log.warning(f"{exchange} : statut HTTP {resp.status}")
@@ -175,7 +273,7 @@ async def _telecharger_tout() -> dict:
 
 
 def _etat_token(brut: dict, token: str) -> dict:
-    """État du token sur chaque plateforme couverte."""
+    """État du token sur chaque plateforme couverte (publiques + débloquées par clé)."""
     token = token.upper().replace("USDT", "") if token.upper().endswith("USDT") else token.upper()
     etat = {}
     for exchange, (_, parser) in SOURCES.items():
@@ -193,6 +291,17 @@ def _etat_token(brut: dict, token: str) -> dict:
             etat[exchange] = {"statut": "token_absent", "reseaux": {}}
         else:
             etat[exchange] = {"statut": "ok", "reseaux": resultat["reseaux"]}
+
+    # Plateformes débloquées via clé API — déjà pré-analysées par token
+    # (format identique aux autres) dans _donnees_signees, donc pas besoin
+    # de "parser" : juste une recherche directe.
+    for exchange, tokens in _donnees_signees.items():
+        infos = tokens.get(token)
+        etat[exchange] = (
+            {"statut": "ok", "reseaux": infos["reseaux"]}
+            if infos else {"statut": "token_absent", "reseaux": {}}
+        )
+
     return etat
 
 
@@ -433,6 +542,7 @@ def resume_telegram(rapport: dict) -> str:
 # chaque permutation d'exchanges. Tout est donc servi depuis un cache
 # mémoire, alimenté par une seule série de requêtes toutes les 6 heures.
 _donnees_brutes: dict = {}
+_donnees_signees: dict = {}  # {exchange: {token: {"reseaux": {...}}}}, via cles_privees.py
 _cache_verdicts: dict[tuple, dict] = {}
 _donnees_chargees = False
 
@@ -449,17 +559,38 @@ def statistiques_filtre() -> dict:
 
 
 async def rafraichir():
-    """Recharge l'état des retraits pour toutes les plateformes couvertes."""
-    global _donnees_brutes, _donnees_chargees
+    """Recharge l'état des retraits : sources publiques + sources débloquées par clé API."""
+    global _donnees_brutes, _donnees_signees, _donnees_chargees, EXCHANGES_SANS_DONNEES_PUBLIQUES
+
     brut = await _telecharger_tout()
     recues = [ex for ex, d in brut.items() if d is not None]
-    if not recues:
+    if not recues and not _donnees_signees:
         log.warning("verif_retraits : aucune plateforme n'a répondu — filtre inopérant")
         return
     _donnees_brutes = brut
+
+    # Tentative des plateformes signées (binance/bybit/okx/mexc). Ne fait
+    # RIEN si aucune clé n'est configurée dans Railway — comportement
+    # identique à avant dans ce cas.
+    try:
+        import cles_privees
+        obtenus = await cles_privees.recuperer_toutes_les_cles_configurees()
+        if obtenus:
+            _donnees_signees = obtenus
+            EXCHANGES_SANS_DONNEES_PUBLIQUES = tuple(
+                ex for ex in EXCHANGES_SANS_DONNEES_PUBLIQUES_BASE if ex not in obtenus
+            )
+    except Exception as e:
+        log.warning(f"verif_retraits : requêtes signées indisponibles ({e})")
+
     _donnees_chargees = True
     _cache_verdicts.clear()
-    log.info(f"verif_retraits : {len(recues)}/{len(SOURCES)} plateformes chargées ({', '.join(recues)})")
+    total_plateformes = len(SOURCES) + len(_donnees_signees)
+    log.info(
+        f"verif_retraits : {len(recues) + len(_donnees_signees)}/{total_plateformes} plateformes "
+        f"chargées ({', '.join(recues + list(_donnees_signees))})"
+        + (f" | débloquées par clé : {', '.join(_donnees_signees)}" if _donnees_signees else "")
+    )
 
 
 async def boucle_rafraichissement(intervalle_sec: float = 6 * 3600):
