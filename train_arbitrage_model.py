@@ -44,7 +44,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("train_arbitrage_model")
 
 # Doit rester cohérent avec opportunity_logger.COLONNES
-COLONNE_CIBLE = "confirmee_5s"
+#
+# ⚠️ Changé le 07/08 : "confirmee_5s" -> "rentable_apres_5s".
+# "confirmee_5s" ne demandait que "le spread net (frais de trading SEULS)
+# est encore au-dessus du seuil de collecte, 0.05%" — un bar tellement bas
+# qu'un modèle entraîné dessus apprend surtout à repérer les spreads qui ne
+# se sont pas totalement effondrés, pas ceux qui seraient RENTABLES.
+# "rentable_apres_5s" inclut les frais de retrait réels de la paire
+# (frais_retrait.frais_transfert) — c'est la vraie question qu'on veut que
+# le modèle apprenne à prédire.
+#
+# Pas de fuite de données : les features ci-dessous (FEATURES_NUMERIQUES_
+# BRUTES) sont toutes mesurées à la DÉTECTION (t=0), jamais après le
+# suivi 5s — le modèle n'a donc accès qu'à ce qu'il connaîtrait réellement
+# au moment de décider s'il faut alerter.
+COLONNE_CIBLE = "rentable_apres_5s"
 SEUIL_LIGNES_RECOMMANDE = 500  # même seuil que opportunity_logger.stats_rapides()
 
 # Colonnes numériques utilisées telles quelles comme features
@@ -138,8 +152,8 @@ def entrainer(features: pd.DataFrame, cible: pd.Series, test_size: float = 0.2, 
         features, cible, test_size=test_size, random_state=graine, stratify=stratifier,
     )
 
-    # scale_pos_weight compense un déséquilibre entre opportunités confirmées
-    # vs disparues (souvent déséquilibré : beaucoup plus de mirages que de
+    # scale_pos_weight compense un déséquilibre entre opportunités rentables
+    # vs non rentables (souvent déséquilibré : beaucoup plus de mirages que de
     # vraies opportunités qui tiennent 5s)
     n_neg = (y_train == 0).sum()
     n_pos = (y_train == 1).sum()
@@ -202,18 +216,18 @@ def afficher_resultats(resultats: dict, n_total: int, n_train: int, n_test: int)
         print(f"[FAIT] ROC-AUC (test)  : {resultats['roc_auc']:.3f}  (0.5 = aléatoire, 1.0 = parfait)")
 
     print(f"\nMatrice de confusion (test, {resultats['n_test']} exemples) :")
-    print("                 Prédit: disparu   Prédit: confirmé")
+    print("                 Prédit: perdant   Prédit: rentable")
     tn, fp = resultats["matrice_confusion"][0]
     fn, tp = resultats["matrice_confusion"][1]
-    print(f"  Réel: disparu       {tn:>6}            {fp:>6}")
-    print(f"  Réel: confirmé      {fn:>6}            {tp:>6}")
+    print(f"  Réel: perdant       {tn:>6}            {fp:>6}")
+    print(f"  Réel: rentable      {fn:>6}            {tp:>6}")
 
     rc = resultats["rapport_classification"]
     if "1" in rc:
         print(
-            f"\n[FAIT] Sur les opportunités RÉELLEMENT confirmées après 5s : "
-            f"le modèle en détecte {rc['1']['recall']:.0%} (rappel), "
-            f"et parmi ce qu'il annonce 'confirmé', {rc['1']['precision']:.0%} le sont vraiment (précision)."
+            f"\n[FAIT] Sur les opportunités RÉELLEMENT rentables après 5s (frais de "
+            f"retrait inclus) : le modèle en détecte {rc['1']['recall']:.0%} (rappel), "
+            f"et parmi ce qu'il annonce 'rentable', {rc['1']['precision']:.0%} le sont vraiment (précision)."
         )
 
     print("\nImportance des features (ce que le modèle utilise le plus) :")
@@ -226,17 +240,26 @@ def afficher_resultats(resultats: dict, n_total: int, n_train: int, n_test: int)
 # ============================================================
 # SAUVEGARDE
 # ============================================================
-def sauvegarder(modele, resultats: dict, features: pd.DataFrame, chemin_sortie: str, chemin_csv: str):
+def sauvegarder(modele, resultats: dict, features: pd.DataFrame, chemin_sortie: str, chemin_csv: str,
+                 n_total: int, n_train: int, n_test: int):
     modele.save_model(chemin_sortie)
 
     chemin_meta = chemin_sortie.rsplit(".", 1)[0] + "_meta.json"
     meta = {
         "entraine_le": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         "source_csv": chemin_csv,
+        # ⚠️ Corrigé le 07/08 : ce champ contenait en réalité n_test (taille
+        # de l'ensemble de TEST), pas le nombre de lignes d'entraînement,
+        # malgré son nom — source d'une confusion déjà rencontrée en
+        # comparant ce fichier au volume réel du CSV source. Les trois
+        # comptes sont maintenant distincts et correctement nommés.
+        "colonne_cible": COLONNE_CIBLE,
         "colonnes_features_ordre": list(features.columns),
         "accuracy_test": resultats["accuracy"],
         "roc_auc_test": resultats["roc_auc"],
-        "n_lignes_entrainement": resultats["n_test"],  # nombre exact dispo directement pour test ; total loggé séparément dans les logs console
+        "n_lignes_total": n_total,
+        "n_lignes_entrainement": n_train,
+        "n_lignes_test": n_test,
     }
     with open(chemin_meta, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -268,12 +291,15 @@ def main():
         )
 
     features, cible = construire_features(df)
-    log.info(f"Répartition des labels : {(cible == 1).sum()} confirmées / {(cible == 0).sum()} disparues")
+    log.info(f"Répartition des labels : {(cible == 1).sum()} rentables / {(cible == 0).sum()} non rentables")
 
     modele, X_train, X_test, y_train, y_test = entrainer(features, cible, test_size=args.test_size)
     resultats = evaluer(modele, X_test, y_test)
     afficher_resultats(resultats, n_total=len(features), n_train=len(X_train), n_test=len(X_test))
-    sauvegarder(modele, resultats, features, args.sortie, args.csv)
+    sauvegarder(
+        modele, resultats, features, args.sortie, args.csv,
+        n_total=len(features), n_train=len(X_train), n_test=len(X_test),
+    )
 
 
 if __name__ == "__main__":
