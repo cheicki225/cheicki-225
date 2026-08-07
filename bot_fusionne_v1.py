@@ -1317,12 +1317,21 @@ async def main():
     # Construit, PAR EXCHANGE, la liste réelle de paires qu'il doit recevoir
     # (au lieu de forcer la même liste partout, ce qui génère des abonnements
     # inutiles/erreurs pour des paires absentes sur tel ou tel exchange)
+    # ⚠️ Corrigé le 07/08 : "coinex" manquait ici depuis l'ajout du
+    # connecteur CoinexWS — provoquait un KeyError('coinex') dès qu'un token
+    # disponible sur cette plateforme apparaissait dans `disponibilite`,
+    # faisant planter le bot au démarrage.
     symboles_par_exchange: dict[str, list[str]] = {
         "binance": [], "bybit": [], "okx": [], "kucoin": [], "bitget": [], "gateio": [],
+        "coinex": [],
     }
     for symbole, exchanges in disponibilite.items():
         for ex in exchanges:
-            symboles_par_exchange[ex].append(symbole)
+            # .setdefault plutôt qu'un accès direct : si jamais une future
+            # plateforme est ajoutée à symbol_discovery sans qu'on pense à
+            # l'ajouter ICI, on ne perd que ses paires (liste vide, log
+            # silencieux) plutôt que de faire planter tout le bot.
+            symboles_par_exchange.setdefault(ex, []).append(symbole)
 
     total_uniques = len(disponibilite)
     print(f"Répartition : " + ", ".join(f"{ex}={len(s)}" for ex, s in symboles_par_exchange.items()))
