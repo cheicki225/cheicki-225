@@ -180,6 +180,81 @@ async def paires_bitget() -> dict:
     return volumes
 
 
+async def paires_whitebit() -> dict:
+    """
+    WhiteBit — ajouté le 07/08. Cote en USDT (BTC_USDT), aucune conversion
+    nécessaire — plus simple que Bitvavo.
+    """
+    async with _session_avec_dns_force() as session:
+        async with session.get("https://whitebit.com/api/v4/public/markets") as resp:
+            marches = await resp.json()
+        async with session.get("https://whitebit.com/api/v4/public/ticker") as resp:
+            tickers = await resp.json()
+
+    valides = {
+        str(m["name"]) for m in marches
+        if isinstance(m, dict) and str(m.get("money", "")).upper() == "USDT"
+        and m.get("tradesEnabled")
+    }
+    volumes = {}
+    for marche, infos in (tickers.items() if isinstance(tickers, dict) else []):
+        if marche not in valides or not isinstance(infos, dict):
+            continue
+        # ⚠️ WhiteBit nomme ses marchés BTC_USDT (avec underscore), mais le
+        # reste du bot (et le connecteur WebSocket) utilise BTCUSDT — sans
+        # cette conversion, l'intersection avec les autres plateformes ne
+        # trouverait jamais aucune correspondance.
+        symbole = marche.replace("_", "")
+        brut = infos.get("quoteVolume") or infos.get("quote_volume") or infos.get("deal") or 0
+        try:
+            volumes[symbole] = float(brut)
+        except (TypeError, ValueError):
+            volumes[symbole] = 0.0
+    return volumes
+
+
+async def paires_bitvavo() -> dict:
+    """
+    Bitvavo — ajouté le 07/08 en même temps que le connecteur WebSocket.
+
+    ⚠️ Bitvavo ne cote qu'en EUR (BTC-EUR), jamais en USDT. Ici on ne fait
+    que RENOMMER le symbole en BTCUSDT (format commun du bot) pour que
+    l'intersection avec les autres plateformes fonctionne — le VRAI prix
+    utilisé pour l'arbitrage est converti séparément, en temps réel, dans
+    BitvavoWS.run() via taux_change.py. Cette fonction ne sert qu'à la
+    DÉCOUVERTE des symboles disponibles, pas au calcul de prix.
+
+    Le "volume" retourné est le volume en EUR, utilisé tel quel comme proxy
+    du volume USDT pour le filtre VOLUME_MIN_USDT — EUR et USDT ayant des
+    valeurs proches (~5-8% d'écart), c'est une approximation acceptable
+    pour un simple seuil de liquidité, pas pour un calcul de prix.
+    """
+    async with _session_avec_dns_force() as session:
+        async with session.get("https://api.bitvavo.com/v2/markets") as resp:
+            marches = await resp.json()
+        async with session.get("https://api.bitvavo.com/v2/ticker/24h") as resp:
+            tickers = await resp.json()
+
+    valides = {
+        str(m["market"]) for m in marches
+        if isinstance(m, dict) and str(m.get("market", "")).endswith("-EUR")
+        and m.get("status") == "trading"
+    }
+    volumes = {}
+    for t in tickers:
+        if not isinstance(t, dict):
+            continue
+        marche = t.get("market")
+        if marche not in valides:
+            continue
+        base = marche.replace("-EUR", "")
+        try:
+            volumes[f"{base}USDT"] = float(t.get("volumeQuote", 0) or 0)
+        except (TypeError, ValueError):
+            volumes[f"{base}USDT"] = 0.0
+    return volumes
+
+
 async def paires_coinex() -> dict:
     """
     CoinEx v2 — ajouté le 04/08.
@@ -245,10 +320,12 @@ async def calculer_intersection(exclure: set[str] | None = None) -> list[str]:
     resultats = await asyncio.gather(
         paires_binance(), paires_bybit(), paires_okx(), paires_kucoin(), paires_bitget(), paires_gateio(),
         paires_coinex(),
+        paires_bitvavo(),
+        paires_whitebit(),
         return_exceptions=True,
     )
 
-    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex"]
+    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex", "bitvavo", "whitebit"]
     ensembles = []
     for nom, r in zip(noms, resultats):
         if isinstance(r, Exception):
@@ -295,10 +372,12 @@ async def calculer_disponibilite_min(
     resultats = await asyncio.gather(
         paires_binance(), paires_bybit(), paires_okx(), paires_kucoin(), paires_bitget(), paires_gateio(),
         paires_coinex(),
+        paires_bitvavo(),
+        paires_whitebit(),
         return_exceptions=True,
     )
 
-    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex"]
+    noms = ["binance", "bybit", "okx", "kucoin", "bitget", "gateio", "coinex", "bitvavo", "whitebit"]
     par_exchange: dict[str, dict] = {}
     for nom, r in zip(noms, resultats):
         if isinstance(r, Exception):

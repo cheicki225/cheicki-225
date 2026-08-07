@@ -237,11 +237,63 @@ def _parser_coinex(data, token: str) -> dict | None:
     return None
 
 
+def _parser_bitvavo(data, token: str) -> dict | None:
+    """
+    https://api.bitvavo.com/v2/assets
+
+    Format confirmé par les SDK officiels (Python/Node/Go/PHP) : chaque
+    devise a un statut GLOBAL (depositStatus/withdrawalStatus), pas un
+    statut par réseau comme kucoin/bitget/gateio — Bitvavo n'expose qu'une
+    liste de noms de réseaux supportés, sans état individuel par réseau.
+    On applique donc le même statut global à tous les réseaux listés.
+    """
+    if not isinstance(data, list):
+        return None
+    for c in data:
+        if not isinstance(c, dict):
+            continue
+        if str(c.get("symbol", "")).upper() != token:
+            continue
+        retrait_ok = str(c.get("withdrawalStatus", "")).upper() == "OK"
+        depot_ok = str(c.get("depositStatus", "")).upper() == "OK"
+        reseaux_bruts = c.get("networks") or ["?"]
+        reseaux = {
+            _normaliser_reseau(r): {"retrait_ouvert": retrait_ok, "depot_ouvert": depot_ok}
+            for r in reseaux_bruts
+        }
+        return {"trouve": True, "reseaux": reseaux}
+    return None
+
+
+def _parser_whitebit(data, token: str) -> dict | None:
+    """
+    https://whitebit.com/api/v4/public/assets
+
+    Dict keyé par symbole ("BTC": {...}), pas de liste — format différent
+    des autres parsers. Statut GLOBAL can_withdraw/can_deposit, comme
+    Kraken et Bitvavo — pas de détail par réseau individuel.
+    """
+    if not isinstance(data, dict):
+        return None
+    infos = data.get(token)
+    if not isinstance(infos, dict):
+        return None
+    return {
+        "trouve": True,
+        "reseaux": {"?": {
+            "retrait_ouvert": bool(infos.get("can_withdraw")),
+            "depot_ouvert": bool(infos.get("can_deposit")),
+        }},
+    }
+
+
 SOURCES = {
     "kucoin": ("https://api.kucoin.com/api/v3/currencies", _parser_kucoin),
     "bitget": ("https://api.bitget.com/api/v2/spot/public/coins", _parser_bitget),
     "gateio": ("https://api.gateio.ws/api/v4/spot/currencies", _parser_gateio),
     "coinex": ("https://api.coinex.com/v2/assets/all-deposit-withdraw-config", _parser_coinex),
+    "bitvavo": ("https://api.bitvavo.com/v2/assets", _parser_bitvavo),
+    "whitebit": ("https://whitebit.com/api/v4/public/assets", _parser_whitebit),
 }
 
 

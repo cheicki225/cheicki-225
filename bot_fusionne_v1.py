@@ -7,7 +7,6 @@ sur le même dictionnaire prix_live partagé.
 Installation :
     pip install websockets aiohttp aiodns --break-system-packages
 """
-# force redeploy 07/08 14:30 — corrige KeyError('coinex') v2
 
 import asyncio
 import json
@@ -555,6 +554,288 @@ class CoinexWS(ExchangeWebSocket):
                                 prix_a_change = ancien is None or ancien["bid"] != bid or ancien["ask"] != ask
                                 prix_live[self.name][symbol] = {
                                     "bid": bid, "ask": ask, "timestamp": time.time(),
+                                }
+                                if prix_a_change:
+                                    asyncio.create_task(verifier_opportunites_symbole(symbol))
+                                    if symbol in TRIANGLE_LEG_SYMBOLS:
+                                        asyncio.create_task(verifier_triangles_exchange(self.name))
+                    finally:
+                        ping_task.cancel()
+            except websockets.exceptions.ConnectionClosed as e:
+                self.log.warning(f"Connexion fermée : {e}")
+            except Exception as e:
+                self.log.error(f"Erreur : {e}")
+            self.log.info(f"Reconnexion dans {reconnect_delay}s...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_delay)
+
+
+class BitvavoWS(ExchangeWebSocket):
+    """
+    Bitvavo — ajouté le 07/08. Score de circulation 84,2 (score le plus
+    élevé après Kraken parmi les plateformes candidates), site confirmé
+    accessible par l'utilisateur.
+
+    ⚠️ PARTICULARITÉ MAJEURE : BITVAVO COTE EN EUROS, PAS EN USDT
+    Toutes les paires Bitvavo sont du type BTC-EUR — il n'existe aucune
+    paire USDT sur cette plateforme (confirmé par leur centre d'aide).
+    Comparer directement un prix EUR à un prix USDT donnerait un résultat
+    n'importe quoi (souvent une "opportunité" énorme et fausse).
+
+    SOLUTION : conversion à l'ingestion, via taux_change.py. Chaque prix
+    reçu est immédiatement transformé en équivalent USDT AVANT d'être
+    écrit dans prix_live — de sorte que tout le reste du bot (détection,
+    alertes, mode papier, positions en attente, suivi 10s) traite Bitvavo
+    exactement comme les 7 autres plateformes, sans aucun cas particulier.
+
+    ⚠️ RISQUE ASSUMÉ : le taux EUR/USDT utilisé pour convertir est celui
+    observé AU MOMENT du tick Bitvavo, pas exactement au même instant que
+    le prix de la plateforme USDT en face. C'est une source d'erreur
+    supplémentaire, inexistante pour les 7 autres plateformes entre elles.
+    Si le taux de change n'est pas disponible ou trop vieux (>15s), le tick
+    est IGNORÉ plutôt que publié avec un taux de repli approximatif — mieux
+    vaut un prix manquant qu'un prix faussement précis qui déclenche une
+    fausse alerte.
+
+    ⚠️ NON TESTÉ CONTRE LE VRAI SERVEUR — mon environnement de développement
+    n'a pas accès aux plateformes crypto. Le format des messages est
+    documenté et confirmé par plusieurs sources indépendantes (SDK officiels
+    Bitvavo en Python/Node/Go/PHP), mais surveille les logs au premier
+    démarrage : si "bitvavo" reste à 0 paire active, c'est ici qu'il faut
+    regarder en premier.
+    """
+    name = "bitvavo"
+
+    async def get_url(self) -> str:
+        return "wss://ws.bitvavo.com/v2/"
+
+    async def get_subscribe_message(self) -> dict:
+        # Format Bitvavo : marchés en EUR ("BTC-EUR"), pas en USDT — la
+        # conversion des symboles se fait ici, à l'abonnement.
+        marches_eur = [self._vers_marche_bitvavo(s) for s in self.symbols]
+        return {
+            "action": "subscribe",
+            "channels": [{"name": "ticker", "markets": marches_eur}],
+        }
+
+    @staticmethod
+    def _vers_marche_bitvavo(symbole_usdt: str) -> str:
+        """BTCUSDT -> BTC-EUR (Bitvavo n'a pas de paire USDT, on demande l'EUR)"""
+        base = symbole_usdt[:-4] if symbole_usdt.endswith("USDT") else symbole_usdt
+        return f"{base}-EUR"
+
+    @staticmethod
+    def _vers_symbole_bot(marche_bitvavo: str) -> str | None:
+        """BTC-EUR -> BTCUSDT, pour réintégrer dans prix_live au format commun"""
+        if not marche_bitvavo.endswith("-EUR"):
+            return None
+        base = marche_bitvavo[:-4]
+        return f"{base}USDT"
+
+    def parse_message(self, raw_message: str):
+        """
+        Ne retourne PAS directement (symbol, bid, ask) comme les autres
+        connecteurs — la conversion EUR->USDT a besoin d'accéder à
+        prix_live, donc elle est faite dans run() plutôt qu'ici. Cette
+        méthode extrait seulement les valeurs brutes en EUR.
+        """
+        try:
+            data = json.loads(raw_message)
+            if data.get("event") != "ticker":
+                return None
+            marche = data.get("market")
+            bid_eur = data.get("bestBid")
+            ask_eur = data.get("bestAsk")
+            if marche and bid_eur and ask_eur:
+                return marche, float(bid_eur), float(ask_eur)
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+    async def run(self):
+        """
+        Surcharge complète de run() (plutôt que parse_message seul) : la
+        conversion EUR->USDT doit se faire APRÈS réception mais AVANT
+        écriture dans prix_live, ce que le contrat standard de la classe de
+        base ne permet pas facilement.
+        """
+        import taux_change
+
+        reconnect_delay = 1
+        max_delay = 30
+        while True:
+            try:
+                url = await self.get_url()
+                self.log.info("Tentative de connexion...")
+                async with websockets.connect(url) as ws:
+                    self.log.info("✅ Connecté")
+                    reconnect_delay = 1
+                    sub_msg = await self.get_subscribe_message()
+                    await ws.send(json.dumps(sub_msg))
+                    self.log.info(f"Abonnement envoyé : {str(sub_msg)[:200]}")
+
+                    async for message in ws:
+                        parsed = self.parse_message(message)
+                        if not parsed:
+                            continue
+                        marche_eur, bid_eur, ask_eur = parsed
+                        symbol = self._vers_symbole_bot(marche_eur)
+                        if not symbol:
+                            continue
+
+                        taux, fiable = taux_change.taux_eur_vers_usdt(prix_live)
+                        if not fiable:
+                            # Pas de taux EUR/USDT frais disponible : on
+                            # préfère ne rien publier plutôt que convertir
+                            # avec un repli approximatif qui pourrait
+                            # déclencher une fausse opportunité.
+                            continue
+
+                        bid_usdt = bid_eur * taux
+                        ask_usdt = ask_eur * taux
+
+                        ancien = prix_live[self.name].get(symbol)
+                        prix_a_change = (
+                            ancien is None or ancien["bid"] != bid_usdt or ancien["ask"] != ask_usdt
+                        )
+                        prix_live[self.name][symbol] = {
+                            "bid": bid_usdt, "ask": ask_usdt, "timestamp": time.time(),
+                        }
+                        if prix_a_change:
+                            asyncio.create_task(verifier_opportunites_symbole(symbol))
+                            if symbol in TRIANGLE_LEG_SYMBOLS:
+                                asyncio.create_task(verifier_triangles_exchange(self.name))
+            except websockets.exceptions.ConnectionClosed as e:
+                self.log.warning(f"Connexion fermée : {e}")
+            except Exception as e:
+                self.log.error(f"Erreur : {e}")
+            self.log.info(f"Reconnexion dans {reconnect_delay}s...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_delay)
+
+
+class WhitebitWS(ExchangeWebSocket):
+    """
+    WhiteBit — ajouté le 07/08. Score de circulation 73,0, site confirmé
+    accessible par l'utilisateur (le HTTP 403 rencontré par le script de
+    classement était bien une protection anti-bot, pas un géoblocage).
+    Cote en USDT — aucune conversion de devise nécessaire, contrairement
+    à Bitvavo.
+
+    ⚠️ PARTICULARITÉ : PING À L'INITIATIVE DU CLIENT
+    Contrairement à Bitget/Bybit (le serveur envoie un ping, le client
+    répond), WhiteBit ferme la connexion après 60s d'inactivité SANS
+    jamais envoyer de ping lui-même — c'est au client d'envoyer un ping
+    toutes les 50s de sa propre initiative. D'où la surcharge complète de
+    run() plutôt qu'un simple handle_ping().
+
+    ⚠️ Un abonnement bookTicker_subscribe par symbole (pas de liste dans
+    params, contrairement à lastprice_subscribe) — la base run() gère déjà
+    l'envoi séquentiel avec 0.3s de délai entre chaque message via
+    get_subscribe_messages(), donc pas de risque de dépasser la limite de
+    200 requêtes/minute même avec plusieurs dizaines de symboles.
+
+    ⚠️ NON TESTÉ CONTRE LE VRAI SERVEUR — format confirmé par la
+    documentation officielle GitHub (whitebit-exchange/api-docs), mais
+    surveille les logs au premier démarrage : si "whitebit" reste à 0 paire
+    active, c'est ici qu'il faut regarder.
+    """
+    name = "whitebit"
+
+    async def get_url(self) -> str:
+        return "wss://api.whitebit.com/ws"
+
+    async def get_subscribe_messages(self) -> list[dict]:
+        # Format WhiteBit : BTC_USDT (underscore), un marché par requête
+        # d'abonnement — contrairement à d'autres canaux WhiteBit qui
+        # acceptent une liste, bookTicker_subscribe n'en documente qu'un.
+        return [
+            {"method": "bookTicker_subscribe", "params": [self._vers_marche(s)], "id": i + 1}
+            for i, s in enumerate(self.symbols)
+        ]
+
+    @staticmethod
+    def _vers_marche(symbole_usdt: str) -> str:
+        """BTCUSDT -> BTC_USDT"""
+        base = symbole_usdt[:-4] if symbole_usdt.endswith("USDT") else symbole_usdt
+        return f"{base}_USDT"
+
+    def parse_message(self, raw_message: str):
+        """
+        Ne traite ici que le premier ticker du batch — utilisé seulement en
+        secours. run() est surchargé pour traiter TOUS les tickers d'un
+        message, au cas où WhiteBit en groupe plusieurs dans une seule
+        mise à jour (la documentation n'en montre qu'un, par prudence on
+        gère quand même le cas général dans run()).
+        """
+        try:
+            data = json.loads(raw_message)
+            if data.get("method") != "bookTicker_update":
+                return None
+            lots = data.get("params") or []
+            if not lots or not isinstance(lots[0], list):
+                return None
+            marche = lots[0][2]
+            bid = lots[0][4]
+            ask = lots[0][6]
+            base = marche.split("_")[0] if marche else None
+            if base and bid and ask:
+                return f"{base}USDT", float(bid), float(ask)
+        except (json.JSONDecodeError, ValueError, TypeError, IndexError, AttributeError):
+            pass
+        return None
+
+    async def run(self):
+        async def ping_loop(ws):
+            while True:
+                await asyncio.sleep(50)  # WhiteBit ferme après 60s sans message client
+                try:
+                    await ws.send(json.dumps({"id": 0, "method": "ping", "params": []}))
+                except Exception:
+                    return
+
+        reconnect_delay = 1
+        max_delay = 30
+        while True:
+            try:
+                url = await self.get_url()
+                self.log.info("Tentative de connexion...")
+                async with websockets.connect(url) as ws:
+                    self.log.info("✅ Connecté")
+                    reconnect_delay = 1
+                    sub_messages = await self.get_subscribe_messages()
+                    for sub_msg in sub_messages:
+                        await ws.send(json.dumps(sub_msg))
+                        await asyncio.sleep(0.3)
+                    self.log.info(f"{len(sub_messages)} abonnement(s) bookTicker envoyé(s)")
+
+                    ping_task = asyncio.create_task(ping_loop(ws))
+                    try:
+                        async for message in ws:
+                            try:
+                                data = json.loads(message)
+                            except json.JSONDecodeError:
+                                continue
+                            if data.get("method") != "bookTicker_update":
+                                continue
+                            # Traite CHAQUE ticker du batch, pas seulement le premier
+                            for lot in data.get("params") or []:
+                                if not isinstance(lot, list) or len(lot) < 8:
+                                    continue
+                                marche, bid, ask = lot[2], lot[4], lot[6]
+                                if not (marche and bid and ask):
+                                    continue
+                                symbol = f"{marche.split('_')[0]}USDT"
+                                try:
+                                    bid_f, ask_f = float(bid), float(ask)
+                                except (TypeError, ValueError):
+                                    continue
+                                ancien = prix_live[self.name].get(symbol)
+                                prix_a_change = (
+                                    ancien is None or ancien["bid"] != bid_f or ancien["ask"] != ask_f
+                                )
+                                prix_live[self.name][symbol] = {
+                                    "bid": bid_f, "ask": ask_f, "timestamp": time.time(),
                                 }
                                 if prix_a_change:
                                     asyncio.create_task(verifier_opportunites_symbole(symbol))
@@ -1312,7 +1593,12 @@ async def main():
         }
 
     # BTC/ETH/SOL toujours en tête (nécessaires pour les triangles), + ETHBTC/SOLBTC
-    for essentiel in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "ETHBTC", "SOLBTC"):
+    # ⚠️ EURUSDT est forcé même hors intersection naturelle : c'est le taux
+    # dont taux_change.py a besoin pour convertir les prix Bitvavo (coté en
+    # EUR) vers USDT. Sans cette ligne, si EURUSDT n'apparaît pas parmi les
+    # paires découvertes normalement, la conversion retomberait tout le
+    # temps sur le taux de repli — imprécis, alors qu'un vrai flux existe.
+    for essentiel in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "ETHBTC", "SOLBTC", "EURUSDT"):
         disponibilite.setdefault(essentiel, {"binance", "bybit", "okx", "kucoin", "bitget", "gateio"})
 
     # Construit, PAR EXCHANGE, la liste réelle de paires qu'il doit recevoir
@@ -1324,7 +1610,7 @@ async def main():
     # faisant planter le bot au démarrage.
     symboles_par_exchange: dict[str, list[str]] = {
         "binance": [], "bybit": [], "okx": [], "kucoin": [], "bitget": [], "gateio": [],
-        "coinex": [],
+        "coinex": [], "bitvavo": [], "whitebit": [],
     }
     for symbole, exchanges in disponibilite.items():
         for ex in exchanges:
@@ -1348,6 +1634,14 @@ async def main():
         # .get() plutôt qu'un accès direct : si la découverte coinex échoue,
         # le bot démarre quand même avec les 6 autres plateformes.
         + repartir_en_connexions(CoinexWS, symboles_par_exchange.get("coinex", []), NB_CONNEXIONS_PAR_EXCHANGE)
+        # Bitvavo : symboles au format BTCUSDT ici (comme le reste), mais
+        # BitvavoWS._vers_marche_bitvavo() les reconvertit en BTC-EUR au
+        # moment de l'abonnement — c'est le seul endroit dans tout le bot
+        # où le format EUR de Bitvavo doit être connu.
+        + repartir_en_connexions(BitvavoWS, symboles_par_exchange.get("bitvavo", []), NB_CONNEXIONS_PAR_EXCHANGE)
+        # WhiteBit : cote en USDT (contrairement à Bitvavo), format BTCUSDT
+        # ici, converti en BTC_USDT au moment de l'abonnement dans la classe.
+        + repartir_en_connexions(WhitebitWS, symboles_par_exchange.get("whitebit", []), NB_CONNEXIONS_PAR_EXCHANGE)
     )
 
     triangles_par_exchange = {

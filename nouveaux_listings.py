@@ -54,6 +54,8 @@ RECUPERATEURS = {
     "bitget": symbol_discovery.paires_bitget,
     "gateio": symbol_discovery.paires_gateio,
     "coinex": symbol_discovery.paires_coinex,
+    "bitvavo": symbol_discovery.paires_bitvavo,
+    "whitebit": symbol_discovery.paires_whitebit,
 }
 
 
