@@ -375,6 +375,82 @@ async def handler_ml_stats(request):
     })
 
 
+async def handler_selection_get(request):
+    """État de la sélection : mode, seuil, liste des plateformes avec leur
+    score (si disponible) et leur statut actif/inactif."""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import selection_exchanges
+    import classement_exchanges
+
+    etat = selection_exchanges.etat()
+    resultat_classement = classement_exchanges.dernier_resultat()
+    scores = {}
+    if resultat_classement:
+        for ligne in resultat_classement["classement"]:
+            scores[ligne["exchange"]] = ligne["score"]
+
+    return _reponse_json({
+        "mode": etat["mode"],
+        "seuil_score": etat["seuil_score"],
+        "max_actives_auto": etat.get("max_actives_auto", 12),
+        "derniere_maj": etat["derniere_maj"],
+        "exchanges": [
+            {
+                "nom": ex,
+                "actif": ex in etat["actifs"],
+                "score": scores.get(ex),
+            }
+            for ex in selection_exchanges.EXCHANGES_CONNECTES
+        ],
+    })
+
+
+async def handler_selection_toggle(request):
+    """POST {"nom": "kraken", "action": "activer"|"desactiver"}"""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import selection_exchanges
+    try:
+        corps = await request.json()
+    except Exception:
+        return _reponse_json({"erreur": "corps JSON invalide"}, 400)
+
+    nom = str(corps.get("nom", "")).lower()
+    action = corps.get("action")
+    if action == "activer":
+        ok, erreur = selection_exchanges.activer(nom)
+    elif action == "desactiver":
+        ok, erreur = selection_exchanges.desactiver(nom)
+    else:
+        return _reponse_json({"erreur": "action doit être 'activer' ou 'desactiver'"}, 400)
+
+    if not ok:
+        return _reponse_json({"erreur": erreur}, 400)
+    return _reponse_json({"ok": True, "etat": selection_exchanges.etat()})
+
+
+async def handler_selection_mode(request):
+    """POST {"mode": "manuel"|"auto", "seuil_score": 50, "max_actives_auto": 12}"""
+    if not _verifier_auth(request):
+        return _reponse_json({"erreur": "non autorisé"}, 401)
+
+    import selection_exchanges
+    try:
+        corps = await request.json()
+    except Exception:
+        return _reponse_json({"erreur": "corps JSON invalide"}, 400)
+
+    ok, erreur = selection_exchanges.definir_mode(
+        str(corps.get("mode", "")), corps.get("seuil_score"), corps.get("max_actives_auto")
+    )
+    if not ok:
+        return _reponse_json({"erreur": erreur}, 400)
+    return _reponse_json({"ok": True, "etat": selection_exchanges.etat()})
+
+
 async def handler_classement_exchanges(request):
     """
     Résultat du dernier classement des plateformes candidates (retrait x
@@ -689,6 +765,9 @@ async def demarrer_serveur_web(port: int = None):
     app.router.add_get("/api/ml_stats", handler_ml_stats)
     app.router.add_get("/api/retraits", handler_retraits)
     app.router.add_get("/api/classement", handler_classement_exchanges)
+    app.router.add_get("/api/selection", handler_selection_get)
+    app.router.add_post("/api/selection/toggle", handler_selection_toggle)
+    app.router.add_post("/api/selection/mode", handler_selection_mode)
     app.router.add_get("/api/transferts", handler_transferts)
     app.router.add_get("/api/erreurs", handler_erreurs)
     app.router.add_get("/api/config", handler_config)

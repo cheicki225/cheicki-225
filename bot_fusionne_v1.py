@@ -29,6 +29,7 @@ import suivi_opportunite
 import positions_attente
 import verif_retraits
 import classement_exchanges
+import selection_exchanges
 import arbitrage_perpetuel
 import duree_spread
 import nouveaux_listings
@@ -852,6 +853,61 @@ class WhitebitWS(ExchangeWebSocket):
             reconnect_delay = min(reconnect_delay * 2, max_delay)
 
 
+class KrakenWS(ExchangeWebSocket):
+    """
+    Kraken — ajouté le 07/08. Score de circulation 99,8, le plus élevé de
+    tout le classement.
+
+    ⚠️ RÉSERVE IMPORTANTE, DÉJÀ SIGNALÉE : Kraken n'expose son état de
+    retraits/dépôts qu'à un niveau GLOBAL par actif (statut "enabled" /
+    "deposit_only" / "withdrawal_only" / "disabled"), sans aucun détail par
+    réseau — contrairement à kucoin/bitget/gateio. Le filtre de retraits
+    (verif_retraits.py) peut donc dire "le retrait est ouvert" mais jamais
+    confirmer qu'un réseau PRÉCIS est commun avec la plateforme en face.
+    En mode strict, ça limite fortement l'utilité pratique de Kraken pour
+    l'arbitrage malgré son excellent score — le score mesure la capacité du
+    token à circuler en général, pas la capacité du bot à le VÉRIFIER.
+
+    Cote en USDT (en plus de USD) — utilisable directement, sans conversion
+    comme pour Bitvavo.
+
+    ⚠️ NON TESTÉ CONTRE LE VRAI SERVEUR — format confirmé par la
+    documentation officielle Kraken (docs.kraken.com/api/docs/websocket-v2).
+    """
+    name = "kraken"
+
+    async def get_url(self) -> str:
+        return "wss://ws.kraken.com/v2"
+
+    async def get_subscribe_message(self) -> dict:
+        # Format Kraken v2 : "BTC/USDT" (slash), pas "BTCUSDT"
+        marches = [self._vers_marche(s) for s in self.symbols]
+        return {"method": "subscribe", "params": {"channel": "ticker", "symbol": marches}}
+
+    @staticmethod
+    def _vers_marche(symbole_usdt: str) -> str:
+        """BTCUSDT -> BTC/USDT"""
+        base = symbole_usdt[:-4] if symbole_usdt.endswith("USDT") else symbole_usdt
+        return f"{base}/USDT"
+
+    def parse_message(self, raw_message: str):
+        try:
+            data = json.loads(raw_message)
+            if data.get("channel") != "ticker":
+                return None
+            for item in data.get("data") or []:
+                if not isinstance(item, dict):
+                    continue
+                marche = item.get("symbol", "")
+                bid, ask = item.get("bid"), item.get("ask")
+                if "/" in marche and bid and ask:
+                    base = marche.split("/")[0]
+                    return f"{base}USDT", float(bid), float(ask)
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+
 class GateioWS(ExchangeWebSocket):
     """
     Gate.io — JSON classique (pas de protobuf comme MEXC), ping/pong géré
@@ -1002,6 +1058,12 @@ def detecter_arbitrage_inter_exchange(symbol: str, seuil_pct: float = SEUIL_MIN_
     opportunites = []
     prix_par_exchange = {}
     for exchange, symbols_data in prix_live.items():
+        # Filtre de sélection : une plateforme désactivée continue de
+        # recevoir ses prix en arrière-plan (le WebSocket tourne toujours),
+        # mais ne participe jamais à la détection — ni comme achat, ni
+        # comme vente. Voir selection_exchanges.py pour le détail.
+        if not selection_exchanges.est_actif(exchange):
+            continue
         if symbol in symbols_data:
             data = symbols_data[symbol]
             if time.time() - data["timestamp"] < 3:
@@ -1610,7 +1672,7 @@ async def main():
     # faisant planter le bot au démarrage.
     symboles_par_exchange: dict[str, list[str]] = {
         "binance": [], "bybit": [], "okx": [], "kucoin": [], "bitget": [], "gateio": [],
-        "coinex": [], "bitvavo": [], "whitebit": [],
+        "coinex": [], "bitvavo": [], "whitebit": [], "kraken": [],
     }
     for symbole, exchanges in disponibilite.items():
         for ex in exchanges:
@@ -1642,6 +1704,9 @@ async def main():
         # WhiteBit : cote en USDT (contrairement à Bitvavo), format BTCUSDT
         # ici, converti en BTC_USDT au moment de l'abonnement dans la classe.
         + repartir_en_connexions(WhitebitWS, symboles_par_exchange.get("whitebit", []), NB_CONNEXIONS_PAR_EXCHANGE)
+        # Kraken : score le plus élevé (99.8) mais réserve connue — pas de
+        # détail par réseau pour le filtre de retraits (voir KrakenWS).
+        + repartir_en_connexions(KrakenWS, symboles_par_exchange.get("kraken", []), NB_CONNEXIONS_PAR_EXCHANGE)
     )
 
     triangles_par_exchange = {
@@ -1689,6 +1754,7 @@ async def main():
     # transmet explicitement plutôt que par import croisé.
     positions_attente.definir_source_prix(prix_live)
     positions_attente.charger_positions()
+    selection_exchanges.charger()
     tasks.append(asyncio.create_task(positions_attente.boucle_surveillance()))
 
     await asyncio.gather(*tasks)
