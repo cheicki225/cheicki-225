@@ -41,11 +41,14 @@ Usage :
 """
 
 import asyncio
+import logging
 import platform
 import sys
 from collections import Counter
 
 import aiohttp
+
+log = logging.getLogger("classement_exchanges")
 
 # Charge le .env local — sans ça, une exécution directe sur ton PC (comme
 # `python3 classement_exchanges.py`) ne verrait jamais tes clés API, même
@@ -674,6 +677,7 @@ async def charger_tout():
     except Exception as e:
         obtenus = {}
         print(f"[classement_exchanges] requêtes signées indisponibles : {e}")
+        log.warning(f"requêtes signées indisponibles : {e}")
 
     for exchange, tokens in obtenus.items():
         # cles_privees.py renvoie {"retrait_ouvert": bool, "depot_ouvert": bool}
@@ -911,6 +915,11 @@ async def rafraichir(top: int = 30):
     ok = [n for n, t, _ in resultats if t is not None]
     print(f"[classement_exchanges] {len(ok)}/{len(SOURCES)} plateformes mesurées, top 1 : "
           f"{classement[0][0] if classement else 'aucune'}")
+    log.info(
+        f"rafraîchi : {len(ok)}/{len(SOURCES)} plateformes mesurées, "
+        f"{len(debloquees)} débloquée(s) par clé, top 1 : "
+        f"{classement[0][0] if classement else 'aucune'}"
+    )
 
 
 async def boucle_rafraichissement(intervalle_sec: float = 6 * 3600):
@@ -922,11 +931,18 @@ async def boucle_rafraichissement(intervalle_sec: float = 6 * 3600):
     listes de tokens et leurs statuts de retrait ne changent pas assez vite
     pour justifier un sondage plus fréquent.
     """
+    log.info("boucle de rafraîchissement démarrée (premier calcul en cours)")
     while True:
         try:
             await rafraichir()
         except Exception as e:
             print(f"[classement_exchanges] erreur de rafraîchissement : {e}")
+            # log.exception (plutôt que log.warning) capture la trace complète
+            # de l'erreur — indispensable ici : avant ce correctif, print()
+            # restait bloqué dans le tampon de sortie de Railway et
+            # n'apparaissait JAMAIS dans les Deploy Logs, rendant le module
+            # invisible même quand une exception l'empêchait de terminer.
+            log.exception("erreur de rafraîchissement")
         await asyncio.sleep(intervalle_sec)
 
 
