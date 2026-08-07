@@ -7,6 +7,7 @@ sur le même dictionnaire prix_live partagé.
 Installation :
     pip install websockets aiohttp aiodns --break-system-packages
 """
+# force redeploy 07/08 14:30 — corrige KeyError('coinex')
 
 import asyncio
 import json
