@@ -73,6 +73,7 @@ async def diffuser_spread(symbole: str, spread_net_pct: float, exchanges: list, 
         "timestamp": time.time(),
     }
     _derniers_spreads[symbole] = donnee
+    log.debug(f"diffusé : {symbole} {arrondi:+.4f}% ({exchanges[0]}->{exchanges[1]})")
 
     if not _connexions_ws:
         return
@@ -100,6 +101,7 @@ async def retirer_spread(symbole: str):
     if symbole not in _derniers_spreads:
         return  # jamais affichée, ou déjà retirée — rien à faire
     del _derniers_spreads[symbole]
+    log.info(f"retiré du panneau live (non circulable) : {symbole}")
 
     if not _connexions_ws:
         return
