@@ -15,6 +15,16 @@ pas besoin de file de messages ni d'IPC.
 Ne bloque JAMAIS le bot : une connexion cassée est juste retirée en
 silence, jamais une exception qui remonterait et interromprait le calcul
 d'arbitrage en cours.
+
+⚠️ FILTRE DE CIRCULATION (ajouté le 07/08)
+Ce module lui-même ne filtre rien — c'est bot_fusionne_v1.py qui décide,
+AVANT d'appeler diffuser_spread(), si la crypto doit apparaître : seules
+celles dont le retrait/dépôt entre les deux plateformes est VÉRIFIÉ ouvert
+(verif_retraits.py, même critère que pour les alertes) sont diffusées.
+Si une crypto affichée devient non circulable, retirer_spread() la retire
+ACTIVEMENT plutôt que de simplement arrêter ses mises à jour — sinon elle
+resterait visible avec une donnée périmée, contrairement à l'objectif du
+filtre (« uniquement les cryptos disponibles sur le site »).
 """
 
 import json
@@ -68,6 +78,33 @@ async def diffuser_spread(symbole: str, spread_net_pct: float, exchanges: list, 
         return
 
     message = json.dumps({"type": "spread", "data": donnee})
+    morts = set()
+    for ws in list(_connexions_ws):
+        try:
+            await ws.send_str(message)
+        except Exception:
+            morts.add(ws)
+    for ws in morts:
+        _connexions_ws.discard(ws)
+
+
+async def retirer_spread(symbole: str):
+    """
+    Retire ACTIVEMENT une crypto du panneau — pas juste « on arrête de la
+    mettre à jour ». Nécessaire quand une crypto autrefois affichée devient
+    non circulable (retrait/dépôt fermé entre-temps) : sans ce retrait
+    explicite, elle resterait visible indéfiniment avec une donnée périmée,
+    et un client qui se connecte APRÈS le changement la verrait encore dans
+    obtenir_etat_actuel() alors qu'elle n'est plus « disponible ».
+    """
+    if symbole not in _derniers_spreads:
+        return  # jamais affichée, ou déjà retirée — rien à faire
+    del _derniers_spreads[symbole]
+
+    if not _connexions_ws:
+        return
+
+    message = json.dumps({"type": "spread_retire", "data": {"symbole": symbole}})
     morts = set()
     for ws in list(_connexions_ws):
         try:

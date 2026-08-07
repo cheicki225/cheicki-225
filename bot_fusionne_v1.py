@@ -954,6 +954,7 @@ from config import (
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
     SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
     MONTANT_PAR_TRADE_USDT, FILTRE_RETRAITS_ACTIF, FILTRE_RETRAITS_MODE,
+    FILTRE_RETRAITS_PANNEAU_LIVE,
     PERP_ACTIF, LISTINGS_ACTIF, LISTINGS_INTERVALLE_SEC,
 )
 import filtre_ml
@@ -1341,14 +1342,32 @@ async def _traiter_opportunites_symbole(symbol: str, log):
 
     # Diffusion live (WebSocket, panneau "Cryptos suivies") — le VRAI meilleur
     # écart net de cette crypto, même négatif (ex: -0.01%) et même sous le
-    # seuil de collecte. Fait AVANT le filtre ci-dessous : sinon la grande
-    # majorité des cryptos, dont l'écart est sous 0.05%, resteraient à « — ».
-    # diffuser_spread() n'envoie rien si la valeur n'a pas changé (pas de spam).
+    # seuil de collecte. Fait AVANT le filtre de seuil ci-dessous : sinon la
+    # grande majorité des cryptos, dont l'écart est sous 0.05%, resteraient
+    # à « — ». diffuser_spread() n'envoie rien si la valeur n'a pas changé.
+    #
+    # ⚠️ Filtre de circulation ajouté le 07/08 : n'affiche QUE les cryptos
+    # dont le retrait/dépôt entre les deux plateformes est VÉRIFIÉ ouvert —
+    # même critère que celui qui décide des alertes (verif_retraits.py),
+    # pour que le panneau ne montre jamais une crypto "disponible" que le
+    # bot lui-même refuserait ensuite de trader.
     live = meilleur_spread_net(symbol)
     if live is not None:
-        asyncio.create_task(spreads_live.diffuser_spread(
-            symbol, live[0], live[1], seuil_inter_actif
-        ))
+        spread_live, exchanges_live = live
+        circulable = True
+        if FILTRE_RETRAITS_ACTIF and FILTRE_RETRAITS_PANNEAU_LIVE:
+            ex_achat, ex_vente = exchanges_live
+            circulable, _motif = verif_retraits.autorise_trade(
+                symbol, ex_achat, ex_vente, FILTRE_RETRAITS_MODE
+            )
+        if circulable:
+            asyncio.create_task(spreads_live.diffuser_spread(
+                symbol, spread_live, exchanges_live, seuil_inter_actif
+            ))
+        else:
+            # Retrait actif, pas juste une absence de mise à jour — voir
+            # spreads_live.retirer_spread() pour la raison.
+            asyncio.create_task(spreads_live.retirer_spread(symbol))
 
     toutes = detecter_arbitrage_inter_exchange(symbol, seuil_pct=SEUIL_MIN_COLLECTE_ML_PCT)
     if not toutes:

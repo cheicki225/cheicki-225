@@ -139,6 +139,7 @@ FRAIS_TRADING_PCT = {
     "coinex": 0.20,  # ajouté le 04/08 — tarif de base sans token CET ni palier VIP
     "bitvavo": 0.25, # ajouté le 07/08 — tarif de base sans réduction de volume
     "whitebit": 0.10, # ajouté le 07/08 — tarif de base (0.1% documenté)
+    "kraken": 0.25,   # ajouté le 07/08 — tarif de base taker (palier le plus bas)
 }
 
 
@@ -326,6 +327,40 @@ MAX_TOKENS_EN_STOCK = 10
 
 # Valeur immobilisée par token, sur la plateforme où tu comptes vendre
 VALEUR_STOCK_PAR_TOKEN_USDT = 50.0
+
+
+# ============================================================
+# GESTION DES PLATEFORMES ACTIVES (manuel / automatique)
+# ============================================================
+# Liste de TOUTES les plateformes connectées au bot — aucune n'est jamais
+# retirée du code, ce dictionnaire ne fait que dire lesquelles participent
+# à la détection d'arbitrage à un instant donné.
+EXCHANGES_CONNUS = [
+    "binance", "bybit", "okx", "kucoin", "bitget", "gateio",
+    "coinex", "bitvavo", "whitebit", "kraken",
+]
+
+# Score minimum (voir classement_exchanges.py) pour qu'une plateforme soit
+# retenue en MODE AUTOMATIQUE. En dessous, elle est exclue même s'il reste
+# de la place jusqu'à MAX_EXCHANGES_AUTO — mieux vaut moins de plateformes
+# que d'en garder une mauvaise juste pour remplir le quota.
+SEUIL_SCORE_AUTO = 50.0
+
+# Plafond de plateformes actives en mode automatique.
+MAX_EXCHANGES_AUTO = 12
+
+# Le panneau « Cryptos suivies » (flux temps réel de la webapp) doit-il
+# n'afficher QUE les cryptos dont la circulation (retrait + dépôt) est
+# vérifiée ouverte entre les deux plateformes du meilleur écart ?
+# Réutilise EXACTEMENT le même critère que le filtre d'alertes
+# (verif_retraits.py, FILTRE_RETRAITS_MODE) — un critère unique appliqué
+# partout dans le bot, pas une seconde logique séparée.
+#
+# ⚠️ Sans clé API pour binance/bybit/okx, une paire impliquant l'une
+# d'elles reste "inconnue" en mode strict — donc masquée elle aussi tant
+# qu'aucune clé n'est configurée. C'est volontaire : afficher une crypto
+# comme "disponible" sans preuve serait trompeur.
+FILTRE_RETRAITS_PANNEAU_LIVE = True
 
 
 # ============================================================
