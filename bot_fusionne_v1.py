@@ -1002,8 +1002,7 @@ from config import (
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
     SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
-    MONTANT_PAR_TRADE_USDT, FILTRE_RETRAITS_ACTIF, FILTRE_RETRAITS_MODE,
-    FILTRE_RETRAITS_PANNEAU_LIVE,
+    MONTANT_PAR_TRADE_USDT,
     PERP_ACTIF, LISTINGS_ACTIF, LISTINGS_INTERVALLE_SEC,
 )
 import filtre_ml
@@ -1395,28 +1394,16 @@ async def _traiter_opportunites_symbole(symbol: str, log):
     # grande majorité des cryptos, dont l'écart est sous 0.05%, resteraient
     # à « — ». diffuser_spread() n'envoie rien si la valeur n'a pas changé.
     #
-    # ⚠️ Filtre de circulation ajouté le 07/08 : n'affiche QUE les cryptos
-    # dont le retrait/dépôt entre les deux plateformes est VÉRIFIÉ ouvert —
-    # même critère que celui qui décide des alertes (verif_retraits.py),
-    # pour que le panneau ne montre jamais une crypto "disponible" que le
-    # bot lui-même refuserait ensuite de trader.
+    # ⚠️ Retiré le 08/08 sur demande explicite : ce panneau affiche à
+    # nouveau TOUT écart détecté, sans filtrer par circulation. Le
+    # vérificateur (verif_retraits.py) reste disponible séparément — voir
+    # le panneau "Circulation des cryptos" (/api/retraits) et /classement —
+    # mais ne touche plus à ce flux temps réel.
     live = meilleur_spread_net(symbol)
     if live is not None:
-        spread_live, exchanges_live = live
-        circulable = True
-        if FILTRE_RETRAITS_ACTIF and FILTRE_RETRAITS_PANNEAU_LIVE:
-            ex_achat, ex_vente = exchanges_live
-            circulable, _motif = verif_retraits.autorise_trade(
-                symbol, ex_achat, ex_vente, FILTRE_RETRAITS_MODE
-            )
-        if circulable:
-            asyncio.create_task(spreads_live.diffuser_spread(
-                symbol, spread_live, exchanges_live, seuil_inter_actif
-            ))
-        else:
-            # Retrait actif, pas juste une absence de mise à jour — voir
-            # spreads_live.retirer_spread() pour la raison.
-            asyncio.create_task(spreads_live.retirer_spread(symbol))
+        asyncio.create_task(spreads_live.diffuser_spread(
+            symbol, live[0], live[1], seuil_inter_actif
+        ))
 
     toutes = detecter_arbitrage_inter_exchange(symbol, seuil_pct=SEUIL_MIN_COLLECTE_ML_PCT)
     if not toutes:
@@ -1453,23 +1440,14 @@ async def _traiter_opportunites_symbole(symbol: str, log):
             franchit_le_seuil = opp.spread_net_pct >= seuil_inter_actif
 
         if franchit_le_seuil:
-            # FILTRE DE RETIRABILITÉ — le token peut-il PHYSIQUEMENT circuler
-            # entre ces deux plateformes ? Sans retrait ouvert côté achat et
-            # dépôt ouvert côté vente, l'arbitrage ne peut pas se boucler : le
-            # bon écart affiché n'est alors qu'un blocage structurel.
-            # Placé APRÈS le seuil et AVANT l'alerte, donc la collecte ML en
-            # amont continue d'enregistrer ces cas — ils restent instructifs.
-            if FILTRE_RETRAITS_ACTIF:
-                autorise_retrait, motif_retrait = verif_retraits.autorise_trade(
-                    opp.symboles[0], opp.exchanges[0], opp.exchanges[1], FILTRE_RETRAITS_MODE
-                )
-                if not autorise_retrait:
-                    log.info(
-                        f"🚫 Écarté (retraits) : {opp.symboles[0]} "
-                        f"{opp.exchanges[0]}->{opp.exchanges[1]} — {motif_retrait}"
-                    )
-                    continue
-
+            # ⚠️ Retiré le 08/08 sur demande explicite : le bot alerte à
+            # nouveau sur TOUS les écarts qui dépassent le seuil, sans
+            # vérifier le retrait/dépôt au moment de l'alerte. verif_retraits.py
+            # reste un outil séparé et fonctionnel — consultable via
+            # /classement, le panneau "Circulation des cryptos" de la webapp,
+            # ou directement en important le module — mais il n'influence
+            # plus quelles alertes partent.
+            #
             # Score ML (probabilité que l'opportunité tienne 5s) — None si le
             # modèle n'est pas encore entraîné/chargé, aucun impact dans ce cas
             opp.score_ml = filtre_ml.score_opportunite(opp)
