@@ -43,6 +43,17 @@ COLONNES = [
     "profit_usdt", "donnee_manquante",
 ]
 
+# ⚠️ Ajouté le 07/08 : CSV SÉPARÉ pour le triangulaire, plutôt que de forcer
+# ses colonnes dans le schéma inter-exchange (exchange_achat/exchange_vente
+# n'ont pas de sens pour un triangle — une seule plateforme, 3 paires).
+# Mélanger les deux schémas dans un même fichier aurait rendu l'analyse a
+# posteriori confuse (colonnes vides selon le type, sens différent).
+CSV_PATH_TRIANGLE = stockage.chemin_donnees("suivi_triangles.csv")
+COLONNES_TRIANGLE = [
+    "timestamp", "opportunite_id", "exchange", "paire_1", "paire_2", "paire_3",
+    "seconde", "spread_brut_pct", "spread_net_pct", "profit_usdt", "donnee_manquante",
+]
+
 # Réglages lus depuis config.py (tout est centralisé là-bas, comme le reste
 # du projet) — les noms courts restent utilisables dans ce module.
 DUREE_SUIVI_SEC = SUIVI_DUREE_SEC
@@ -58,14 +69,49 @@ MONTANT_SUIVI_USDT = 50.0
 
 
 def _init_csv():
+    """
+    Comme opportunity_logger._init_csv() : si un fichier existant a un
+    ancien schéma de colonnes, il est archivé plutôt que réutilisé tel
+    quel — sinon les nouvelles lignes se retrouveraient décalées sous les
+    en-têtes de l'ancien fichier.
+    """
+    if os.path.exists(CSV_PATH):
+        with open(CSV_PATH, encoding="utf-8") as f:
+            entete_existant = f.readline().strip().split(",")
+        if entete_existant != COLONNES:
+            horodatage = time.strftime("%Y%m%d_%H%M%S")
+            chemin_archive = CSV_PATH.replace(".csv", f"_ancien_schema_{horodatage}.csv")
+            os.rename(CSV_PATH, chemin_archive)
+            log.warning(f"suivi_opportunites.csv : schéma changé, ancien fichier archivé sous {chemin_archive}")
+
     if not os.path.exists(CSV_PATH):
         with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(COLONNES)
 
 
+def _init_csv_triangle():
+    if os.path.exists(CSV_PATH_TRIANGLE):
+        with open(CSV_PATH_TRIANGLE, encoding="utf-8") as f:
+            entete_existant = f.readline().strip().split(",")
+        if entete_existant != COLONNES_TRIANGLE:
+            horodatage = time.strftime("%Y%m%d_%H%M%S")
+            chemin_archive = CSV_PATH_TRIANGLE.replace(".csv", f"_ancien_schema_{horodatage}.csv")
+            os.rename(CSV_PATH_TRIANGLE, chemin_archive)
+            log.warning(f"suivi_triangles.csv : schéma changé, ancien fichier archivé sous {chemin_archive}")
+
+    if not os.path.exists(CSV_PATH_TRIANGLE):
+        with open(CSV_PATH_TRIANGLE, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(COLONNES_TRIANGLE)
+
+
 def _ecrire_ligne(ligne: dict):
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=COLONNES).writerow(ligne)
+
+
+def _ecrire_ligne_triangle(ligne: dict):
+    with open(CSV_PATH_TRIANGLE, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=COLONNES_TRIANGLE).writerow(ligne)
 
 
 def _lire_prix_live(prix_live: dict, exchange: str, symbole: str):
@@ -236,6 +282,140 @@ async def _envoyer_resume_telegram(
     await telegram_notifier.envoyer_message_simple(
         f"{emoji} <b>Suivi {DUREE_SUIVI_SEC}s</b> — {symbole} {ex_achat}→{ex_vente}\n"
         f"Spread net par seconde (sur {montant_usdt:.0f}$, frais trading + retrait inclus) :\n"
+        f"<code>{ligne_evolution}</code>\n"
+        f"Départ : {depart_pct:+.2f}% → Fin (t={DUREE_SUIVI_SEC}s) : {fin_pct:+.2f}%"
+        f" | meilleur : {meilleur_pct:+.2f}%\n"
+        f"{ligne_bascule}",
+        repondre_a=message_id_alerte,
+    )
+
+
+# ============================================================
+# SUIVI DU TRIANGULAIRE — miroir simplifié, un seul exchange
+# ============================================================
+# ⚠️ Ajouté le 07/08. Contrairement à suivre_opportunite() (deux
+# plateformes, un transfert implicite entre elles), un triangle se joue
+# entièrement sur UNE SEULE plateforme — pas de retrait, pas de transfert,
+# donc pas de frais_retrait à ajouter : spread_net_pct (3x frais de trading
+# déjà déduits) EST le profit réel, contrairement à l'inter-exchange où le
+# "spread net" affiché ignore encore les frais de retrait tant qu'on n'a
+# pas explicitement calculé le "bénéfice réel".
+async def suivre_triangle(
+    opp, prix_live: dict, exchange: str, triangle: tuple[str, str, str],
+    message_id_alerte: int | None = None, notifier: bool = True,
+):
+    """
+    Suit un triangle pendant DUREE_SUIVI_SEC secondes, une lecture par
+    seconde, en relisant directement prix_live (même cache, aucun appel
+    réseau) — recalcule le même chemin USDT -> base1 -> base2 -> USDT que
+    detecter_arbitrage_triangulaire(), sans dépendre de cette fonction pour
+    éviter un import circulaire avec bot_fusionne_v1.py.
+
+    À lancer juste après l'alerte triangulaire :
+        asyncio.create_task(suivi_opportunite.suivre_triangle(
+            opp, prix_live, exchange, triangle, message_id_alerte=mid))
+    """
+    _init_csv_triangle()
+
+    paire_1, paire_2, paire_3 = triangle
+    opportunite_id = f"tri:{exchange}:{'-'.join(triangle)}:{int(opp.timestamp)}"
+    frais_total_pct = FRAIS_TRADING_PCT.get(exchange, 0.10) * 3
+
+    points = []  # (seconde, spread_net_pct ou None)
+
+    for seconde in range(DUREE_SUIVI_SEC):
+        d1 = _lire_prix_live(prix_live, exchange, paire_1)
+        d2 = _lire_prix_live(prix_live, exchange, paire_2)
+        d3 = _lire_prix_live(prix_live, exchange, paire_3)
+
+        spread_brut_pct = spread_net_pct = None
+        if d1 and d2 and d3:
+            try:
+                montant = 1.0 / d1["ask"] / d2["ask"] * d3["bid"]
+                spread_brut_pct = (montant - 1.0) * 100
+                spread_net_pct = spread_brut_pct - frais_total_pct
+            except (ZeroDivisionError, KeyError):
+                pass
+
+        if spread_net_pct is None:
+            log.debug(f"⚠️ Suivi triangle {exchange} {'-'.join(triangle)} : prix manquant à t={seconde}s")
+            _ecrire_ligne_triangle({
+                "timestamp": time.time(), "opportunite_id": opportunite_id, "exchange": exchange,
+                "paire_1": paire_1, "paire_2": paire_2, "paire_3": paire_3, "seconde": seconde,
+                "spread_brut_pct": "", "spread_net_pct": "", "profit_usdt": "", "donnee_manquante": True,
+            })
+        else:
+            profit_usdt = MONTANT_SUIVI_USDT * (spread_net_pct / 100)
+            _ecrire_ligne_triangle({
+                "timestamp": time.time(), "opportunite_id": opportunite_id, "exchange": exchange,
+                "paire_1": paire_1, "paire_2": paire_2, "paire_3": paire_3, "seconde": seconde,
+                "spread_brut_pct": round(spread_brut_pct, 4), "spread_net_pct": round(spread_net_pct, 4),
+                "profit_usdt": round(profit_usdt, 4), "donnee_manquante": False,
+            })
+            log.info(
+                f"📈 Suivi triangle {exchange} {'-'.join(triangle)} t={seconde}s : "
+                f"spread net={spread_net_pct:+.3f}% (profit sur {MONTANT_SUIVI_USDT:.0f}$ = {profit_usdt:+.3f}$)"
+            )
+
+        points.append((seconde, spread_net_pct))
+        if seconde < DUREE_SUIVI_SEC - 1:
+            await asyncio.sleep(INTERVALLE_SEC)
+
+    await _envoyer_resume_telegram_triangle(
+        exchange, triangle, points, message_id_alerte=message_id_alerte, notifier=notifier,
+    )
+
+
+async def _envoyer_resume_telegram_triangle(
+    exchange: str, triangle: tuple[str, str, str], points: list,
+    message_id_alerte: int | None = None, notifier: bool = True,
+):
+    import telegram_notifier
+
+    chemin = "→".join(triangle)
+
+    if not notifier:
+        log.debug(f"Suivi triangle {exchange} {chemin} : résumé Telegram non envoyé — CSV rempli")
+        return
+
+    valides = [(s, v) for s, v in points if v is not None]
+
+    if not valides:
+        await telegram_notifier.envoyer_message_simple(
+            f"📉 <b>Suivi triangle 10s</b> — {exchange} : {chemin}\n"
+            f"Aucune donnée de prix reçue pendant le suivi (flux WebSocket muet sur cette fenêtre).",
+            repondre_a=message_id_alerte,
+        )
+        return
+
+    a_ete_positif = any(v > 0 for _, v in valides)
+    if SUIVI_ENVOYER_SEULEMENT_SI_POSITIF and not a_ete_positif:
+        log.info(
+            f"📉 Suivi triangle {exchange} {chemin} : négatif sur toute la fenêtre "
+            f"({valides[0][1]:+.2f}% → {valides[-1][1]:+.2f}%) — enregistré au CSV, "
+            f"résumé Telegram omis (SUIVI_ENVOYER_SEULEMENT_SI_POSITIF=True)"
+        )
+        return
+
+    ligne_evolution = " → ".join(f"{v:+.2f}%" if v is not None else "?" for _, v in points)
+    depart_pct = valides[0][1]
+    fin_pct = valides[-1][1]
+    meilleur_pct = max(v for _, v in valides)
+
+    bascule = next((s for s, v in valides if v is not None and v < 0), None)
+    if bascule is not None:
+        ligne_bascule = f"⚠️ Passé négatif à t={bascule}s"
+    elif fin_pct > 0:
+        ligne_bascule = f"✅ Resté positif sur toute la fenêtre de {DUREE_SUIVI_SEC}s"
+    else:
+        ligne_bascule = "❌ Négatif dès le départ"
+
+    emoji = "🟢" if fin_pct > 0 else "🔴"
+
+    await telegram_notifier.envoyer_message_simple(
+        f"{emoji} <b>Suivi triangle {DUREE_SUIVI_SEC}s</b> — {exchange} : {chemin}\n"
+        f"Spread net par seconde (3x frais de trading déjà déduits — aucun frais de "
+        f"retrait, tout se joue sur une seule plateforme) :\n"
         f"<code>{ligne_evolution}</code>\n"
         f"Départ : {depart_pct:+.2f}% → Fin (t={DUREE_SUIVI_SEC}s) : {fin_pct:+.2f}%"
         f" | meilleur : {meilleur_pct:+.2f}%\n"

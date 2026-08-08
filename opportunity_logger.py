@@ -159,6 +159,28 @@ async def logger_avec_suivi(opp, detecter_inter_exchange_func, detecter_triangul
                 if encore_la and cle_spread:
                     ligne[cle_spread] = nouvelle.spread_net_pct
 
+                # ⚠️ Corrigé le 07/08 : jusque-là, rentable_apres_5s et
+                # spread_net_reel_pct_apres_5s restaient TOUJOURS vides pour
+                # le triangulaire — cette branche ne les renseignait jamais,
+                # contrairement à la branche inter_exchange ci-dessus.
+                # Conséquence concrète : train_arbitrage_model.py fait un
+                # dropna() sur rentable_apres_5s, donc TOUTES les lignes
+                # triangulaires étaient silencieusement exclues de
+                # l'entraînement — le modèle n'apprenait jamais rien du
+                # triangulaire, sans qu'aucune erreur ne le signale.
+                #
+                # Pas de frais de retrait à soustraire ici : un triangle ne
+                # quitte jamais la plateforme, spread_net_pct (3x frais de
+                # trading déjà déduits) EST déjà le profit réel — contrairement
+                # à l'inter-exchange où le spread net affiché ignore encore
+                # le coût du transfert retour.
+                if encore_la and cle_reel:
+                    ligne[cle_reel] = round(nouvelle.spread_net_pct, 4)
+                    if cle_rentable:
+                        ligne[cle_rentable] = "1" if nouvelle.spread_net_pct > 0 else "0"
+                elif cle_rentable:
+                    ligne[cle_rentable] = "0"  # triangle disparu = non rentable, sans ambiguïté
+
             ligne[cle_confirmee] = "1" if encore_la else "0"
         except Exception as e:
             log.error(f"Erreur vérification suivi : {e}")

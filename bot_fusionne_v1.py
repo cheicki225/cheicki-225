@@ -49,6 +49,31 @@ prix_live = {}
 # ============================================================
 # ================  PARTIE 1 : WEBSOCKETS (Bloc 2)  ==========
 # ============================================================
+def _decouper_symbole(symbole_interne: str) -> tuple[str, str]:
+    """
+    Sépare un symbole interne du bot ("BTCUSDT", "ETHBTC") en (base, cotation).
+
+    Nécessaire pour les connecteurs dont l'API distingue explicitement la
+    devise de cotation dans le nom du marché (WhiteBit : BTC_USDT, Kraken :
+    BTC/USDT) — le bot, lui, n'utilise QUE des symboles concaténés en
+    interne (prix_live, TRIANGLE_LEG_SYMBOLS, etc.), y compris pour les
+    jambes croisées du triangulaire (ETHBTC, SOLBTC) qui ne sont PAS en USDT.
+
+    Sans cette fonction générique, un connecteur qui suppose "se termine
+    toujours par USDT" convertit "ETHBTC" en un marché absurde à l'envoi, et
+    pire, mal-décode une vraie mise à jour ETH/BTC comme si c'était ETHUSDT
+    à la réception — corrompant silencieusement prix_live. C'est exactement
+    le bug corrigé le 07/08 dans WhitebitWS et KrakenWS.
+
+    L'ordre de vérification compte : USDT (4 lettres) avant BTC (3 lettres),
+    sinon "SOLUSDT" serait mal coupé.
+    """
+    for cotation in ("USDT", "BTC"):
+        if symbole_interne.endswith(cotation) and len(symbole_interne) > len(cotation):
+            return symbole_interne[: -len(cotation)], cotation
+    return symbole_interne, "USDT"  # repli, ne devrait pas arriver en pratique
+
+
 class ExchangeWebSocket(ABC):
     name: str = "base"
     ping_interval: int = 20
@@ -756,10 +781,18 @@ class WhitebitWS(ExchangeWebSocket):
         ]
 
     @staticmethod
-    def _vers_marche(symbole_usdt: str) -> str:
-        """BTCUSDT -> BTC_USDT"""
-        base = symbole_usdt[:-4] if symbole_usdt.endswith("USDT") else symbole_usdt
-        return f"{base}_USDT"
+    def _vers_marche(symbole_interne: str) -> str:
+        """
+        BTCUSDT -> BTC_USDT, ETHBTC -> ETH_BTC.
+
+        ⚠️ Corrigé le 07/08 pour le triangulaire : la version précédente
+        supposait TOUJOURS un symbole se terminant en USDT. Pour ETHBTC ou
+        SOLBTC (jambes croisées du triangle), elle produisait un marché
+        absurde ("ETHBTC_USDT") au lieu de "ETH_BTC" — abonnement inutile,
+        silencieusement ignoré par WhiteBit plutôt qu'une erreur visible.
+        """
+        base, cotation = _decouper_symbole(symbole_interne)
+        return f"{base}_{cotation}"
 
     def parse_message(self, raw_message: str):
         """
@@ -779,9 +812,17 @@ class WhitebitWS(ExchangeWebSocket):
             marche = lots[0][2]
             bid = lots[0][4]
             ask = lots[0][6]
-            base = marche.split("_")[0] if marche else None
-            if base and bid and ask:
-                return f"{base}USDT", float(bid), float(ask)
+            # ⚠️ Corrigé le 07/08 : reconstruit le symbole depuis le VRAI
+            # séparateur du marché reçu (base_cotation), au lieu de toujours
+            # supposer "USDT" — sinon une mise à jour ETH_BTC aurait été
+            # enregistrée à tort sous la clé ETHUSDT, corrompant les prix.
+            if marche and "_" in marche:
+                base, cotation = marche.split("_", 1)
+                symbole = f"{base}{cotation}"
+            else:
+                symbole = None
+            if symbole and bid and ask:
+                return symbole, float(bid), float(ask)
         except (json.JSONDecodeError, ValueError, TypeError, IndexError, AttributeError):
             pass
         return None
@@ -885,10 +926,16 @@ class KrakenWS(ExchangeWebSocket):
         return {"method": "subscribe", "params": {"channel": "ticker", "symbol": marches}}
 
     @staticmethod
-    def _vers_marche(symbole_usdt: str) -> str:
-        """BTCUSDT -> BTC/USDT"""
-        base = symbole_usdt[:-4] if symbole_usdt.endswith("USDT") else symbole_usdt
-        return f"{base}/USDT"
+    def _vers_marche(symbole_interne: str) -> str:
+        """
+        BTCUSDT -> BTC/USDT, ETHBTC -> ETH/BTC.
+
+        ⚠️ Corrigé le 07/08 pour le triangulaire — même bug que WhiteBit :
+        la version précédente supposait toujours USDT, produisant un
+        marché invalide pour les jambes croisées (ETHBTC, SOLBTC).
+        """
+        base, cotation = _decouper_symbole(symbole_interne)
+        return f"{base}/{cotation}"
 
     def parse_message(self, raw_message: str):
         try:
@@ -900,9 +947,11 @@ class KrakenWS(ExchangeWebSocket):
                     continue
                 marche = item.get("symbol", "")
                 bid, ask = item.get("bid"), item.get("ask")
+                # ⚠️ Corrigé le 07/08 : reconstruit depuis le VRAI séparateur
+                # reçu, plus jamais un "USDT" supposé à tort (voir WhiteBit).
                 if "/" in marche and bid and ask:
-                    base = marche.split("/")[0]
-                    return f"{base}USDT", float(bid), float(ask)
+                    base, cotation = marche.split("/", 1)
+                    return f"{base}{cotation}", float(bid), float(ask)
         except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
             pass
         return None
@@ -1510,6 +1559,14 @@ async def verifier_triangles_exchange(exchange: str):
     if not telegram_menu_bot.etat_bot.en_marche or telegram_menu_bot.etat_bot.en_pause:
         return
 
+    # ⚠️ Ajouté le 07/08 : le triangulaire ignorait totalement la sélection
+    # de plateformes (manuel/auto, voir selection_exchanges.py) — une
+    # plateforme désactivée par l'utilisateur continuait quand même de
+    # générer des alertes triangulaires. Même filtre que pour
+    # l'inter-exchange, pour un comportement cohérent partout dans le bot.
+    if not selection_exchanges.est_actif(exchange):
+        return
+
     seuil_tri_actif = telegram_menu_bot.etat_bot.seuil_triangulaire
 
     for triangle in TRIANGLES_STANDARD:
@@ -1528,6 +1585,20 @@ async def verifier_triangles_exchange(exchange: str):
             continue
         _dernieres_valeurs_opportunites[cle] = valeur_actuelle
 
+        # Diffusion vers le panneau "Cryptos suivies" — clé synthétique
+        # puisqu'il n'y a qu'UN SEUL exchange en triangulaire (pas de paire
+        # achat/vente comme pour l'inter-exchange). exchanges=[exchange,
+        # exchange] réutilise volontairement le même format que
+        # spreads_live attend, pour ne rien casser côté webapp.
+        #
+        # ⚠️ Pas de filtre de circulation ici (contrairement à l'inter-
+        # exchange) : le triangulaire ne transfère JAMAIS rien entre
+        # plateformes — retrait/dépôt n'entrent tout simplement pas en jeu.
+        asyncio.create_task(spreads_live.diffuser_spread(
+            f"🔺{'-'.join(opp.symboles)}@{exchange}", opp.spread_net_pct,
+            [exchange, exchange], seuil_tri_actif,
+        ))
+
         if opp.spread_net_pct >= seuil_tri_actif:
             opp.score_ml = filtre_ml.score_opportunite(opp)
             telegram_menu_bot.etat_bot.enregistrer_opportunite(opp)
@@ -1540,15 +1611,30 @@ async def verifier_triangles_exchange(exchange: str):
             # notification, pas le traitement ni le log (le scan continue).
             mode_nuit = telegram_menu_bot.etat_bot.mode_nuit
 
+            message_id_alerte = None
             if _peut_alerter(opp.symboles[0]) and not bloque_par_ml:
                 score_txt = f" | score ML={opp.score_ml:.0%}" if opp.score_ml is not None else ""
                 log.info(f"💰 OPPORTUNITÉ : {opp}{score_txt}")
                 if not mode_nuit:
-                    await envoyer_alerte(opp)
+                    message_id_alerte = await envoyer_alerte(opp)
             elif bloque_par_ml:
                 log.debug(f"(ignoré, score ML {opp.score_ml:.0%} < seuil {SEUIL_ML_CONFIANCE_MIN:.0%}) {opp}")
             else:
                 log.debug(f"(ignoré, cooldown 1x/min) {opp}")
+
+            # ⚠️ Ajouté le 07/08 : suivi 10s dédié (suivre_triangle), jusque
+            # là totalement absent pour le triangulaire — seul l'inter-
+            # exchange en bénéficiait. Miroir simplifié à un seul exchange
+            # (pas de frais de retrait à ajouter, voir suivi_opportunite.py).
+            # Tourne dès que le seuil triangulaire est dépassé, MÊME en mode
+            # nuit (seule sa notification Telegram est coupée) — même
+            # principe que le suivi inter-exchange.
+            if SUIVI_ACTIF:
+                asyncio.create_task(suivi_opportunite.suivre_triangle(
+                    opp, prix_live, exchange, triangle,
+                    message_id_alerte=message_id_alerte,
+                    notifier=bool(message_id_alerte),
+                ))
 
         asyncio.create_task(opportunity_logger.logger_avec_suivi(
             opp, _detecter_inter_exchange_ml, _detecter_triangulaire_ml, triangle
@@ -1682,6 +1768,24 @@ async def main():
     for essentiel in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "ETHBTC", "SOLBTC", "EURUSDT"):
         disponibilite.setdefault(essentiel, {"binance", "bybit", "okx", "kucoin", "bitget", "gateio"})
 
+    # ⚠️ Ajouté le 07/08 pour étendre le triangulaire aux nouvelles
+    # plateformes (coinex, whitebit, kraken) : UNION plutôt que setdefault,
+    # pour que ces exchanges reçoivent ETHBTC/SOLBTC même si la clé existe
+    # déjà dans disponibilite (setdefault seul n'aurait rien changé, la clé
+    # existant presque certainement déjà via les 6 plateformes d'origine).
+    # Un exchange qui n'a en réalité pas cette paire ignore juste
+    # silencieusement l'abonnement — même philosophie que le reste du bot.
+    #
+    # ⚠️ BITVAVO VOLONTAIREMENT EXCLUE : son connecteur (BitvavoWS) ne gère
+    # QUE les marchés "-EUR" (voir _vers_marche_bitvavo) — il n'a aucune
+    # notion de paire croisée type ETH-BTC. La forcer produirait un
+    # abonnement mal formé, ou pire, une mauvaise interprétation si un
+    # marché EUR homonyme existait par coïncidence. Bitvavo continue de
+    # participer au triangulaire UNIQUEMENT via les jambes USDT normales
+    # (BTCUSDT, ETHUSDT, SOLUSDT), déjà couvertes plus haut.
+    for jambe_croisee in ("ETHBTC", "SOLBTC"):
+        disponibilite[jambe_croisee] = disponibilite.get(jambe_croisee, set()) | {"coinex", "whitebit", "kraken"}
+
     # Construit, PAR EXCHANGE, la liste réelle de paires qu'il doit recevoir
     # (au lieu de forcer la même liste partout, ce qui génère des abonnements
     # inutiles/erreurs pour des paires absentes sur tel ou tel exchange)
@@ -1728,10 +1832,13 @@ async def main():
         + repartir_en_connexions(KrakenWS, symboles_par_exchange.get("kraken", []), NB_CONNEXIONS_PAR_EXCHANGE)
     )
 
-    triangles_par_exchange = {
-        ex: [("BTCUSDT", "ETHBTC", "ETHUSDT"), ("BTCUSDT", "SOLBTC", "SOLUSDT")]
-        for ex in ("binance", "bybit", "bitget", "okx", "kucoin", "gateio")
-    }
+    # ⚠️ triangles_par_exchange (dict mort, retiré le 07/08) : la détection
+    # triangulaire ne filtre PAS par plateforme via une liste dédiée — elle
+    # tourne pour n'importe quel exchange dès qu'une jambe change de prix
+    # (voir TRIANGLE_LEG_SYMBOLS + le déclenchement dans ExchangeWebSocket.
+    # run(), hérité par toutes les classes qui ne surchargent pas run()).
+    # Les 10 plateformes connectées y participent donc déjà, sans liste à
+    # maintenir séparément.
 
     symbols_a_surveiller = list(disponibilite.keys())
 
