@@ -66,20 +66,30 @@ def enregistrer_fichier(chemin: str, max_lignes: int = MAX_LIGNES_DEFAUT):
     log.debug(f"surveillance activée : {os.path.basename(chemin)} (max {max_lignes} lignes)")
 
 
-def _tronquer_si_necessaire(chemin: str, max_lignes: int) -> tuple[bool, int]:
+def _tronquer_si_necessaire(chemin: str, max_lignes: int) -> tuple[str, int]:
     """
-    Retourne (a_tronque, lignes_supprimees). Ne charge JAMAIS le fichier
-    entier en mémoire — une deque bornée à max_lignes suffit, même sur un
-    CSV de plusieurs centaines de Mo.
+    Retourne (statut, lignes_supprimees), avec statut parmi :
+      "rien_a_faire"    — fichier absent, vide, ou déjà sous le plafond
+      "tronque"         — réécriture réussie, lignes_supprimees > 0
+      "echec_ecriture"  — le disque était trop plein pour même écrire le
+                           fichier temporaire (voir _supprimer_en_urgence)
+
+    Cette distinction compte : seul "echec_ecriture" doit déclencher le
+    recours à la suppression totale — un petit fichier légitimement sous
+    le plafond ne doit JAMAIS être supprimé juste parce que le disque
+    reste critique à cause d'AUTRES fichiers plus gros.
+
+    Ne charge JAMAIS le fichier entier en mémoire — une deque bornée à
+    max_lignes suffit, même sur un CSV de plusieurs centaines de Mo.
     """
     if not os.path.exists(chemin):
-        return False, 0
+        return "rien_a_faire", 0
 
     try:
         with open(chemin, encoding="utf-8", newline="") as f:
             entete = f.readline()
             if not entete:
-                return False, 0  # fichier vide, rien à faire
+                return "rien_a_faire", 0  # fichier vide
 
             total = 0
             dernieres_lignes: deque = deque(maxlen=max_lignes)
@@ -88,7 +98,7 @@ def _tronquer_si_necessaire(chemin: str, max_lignes: int) -> tuple[bool, int]:
                 total += 1
 
         if total <= max_lignes:
-            return False, 0  # sous le plafond, rien à faire
+            return "rien_a_faire", 0  # sous le plafond
 
         chemin_temp = chemin + ".tmp_rotation"
         with open(chemin_temp, "w", encoding="utf-8", newline="") as f:
@@ -96,19 +106,63 @@ def _tronquer_si_necessaire(chemin: str, max_lignes: int) -> tuple[bool, int]:
             f.writelines(dernieres_lignes)
         os.replace(chemin_temp, chemin)  # remplacement atomique
 
-        lignes_supprimees = total - len(dernieres_lignes)
-        return True, lignes_supprimees
+        return "tronque", total - len(dernieres_lignes)
 
+    except OSError as e:
+        chemin_temp = chemin + ".tmp_rotation"
+        if os.path.exists(chemin_temp):
+            try:
+                os.remove(chemin_temp)
+            except OSError:
+                pass
+        if e.errno == 28:  # No space left on device
+            log.error(
+                f"rotation de {chemin} impossible : disque plein AU MOMENT "
+                f"MÊME d'écrire le fichier temporaire"
+            )
+            return "echec_ecriture", 0
+        log.error(f"échec de la rotation de {chemin} : {e}")
+        return "rien_a_faire", 0
     except Exception as e:
         log.error(f"échec de la rotation de {chemin} : {e}")
-        return False, 0
+        return "rien_a_faire", 0
+
+
+def _supprimer_en_urgence(chemin: str) -> bool:
+    """
+    Dernier recours quand le disque est si plein que même écrire un
+    fichier temporaire plus petit est impossible : supprime le fichier
+    ENTIÈREMENT plutôt que de le tronquer — une suppression ne nécessite
+    AUCUNE écriture, contrairement à une réécriture tronquée, donc elle
+    fonctionne même à 0 octet libre.
+
+    ⚠️ Perte totale des données de ce fichier, pas juste les plus
+    anciennes. C'est le prix d'un disque arrivé à saturation complète —
+    la priorité absolue devient de faire tourner le bot à nouveau, pas de
+    préserver l'historique. Le fichier est recréé vide au prochain
+    _init_csv() du module concerné.
+    """
+    if not os.path.exists(chemin):
+        return False
+    try:
+        taille_mo = os.path.getsize(chemin) / (1024 * 1024)
+        os.remove(chemin)
+        log.critical(
+            f"🚨 SUPPRESSION D'URGENCE : {os.path.basename(chemin)} "
+            f"({taille_mo:.1f} Mo libérés) — disque trop plein pour même "
+            f"une rotation tronquée, fichier supprimé entièrement"
+        )
+        return True
+    except OSError as e:
+        log.critical(f"🚨 impossible de supprimer {chemin} même en urgence : {e}")
+        return False
 
 
 def verifier_toutes_les_rotations():
     """Passe normale : chaque fichier enregistré, à son plafond habituel."""
     for chemin, max_lignes in _fichiers_surveilles.items():
-        a_tronque, supprimees = _tronquer_si_necessaire(chemin, max_lignes)
-        if a_tronque:
+        statut, supprimees = _tronquer_si_necessaire(chemin, max_lignes)
+        if statut == "tronque":
             log.info(
                 f"📉 Rotation : {os.path.basename(chemin)} — "
                 f"{supprimees} ancienne(s) ligne(s) supprimée(s), "
@@ -140,12 +194,21 @@ def verifier_urgence_disque() -> bool:
         f"— nettoyage d'urgence immédiat de tous les fichiers surveillés"
     )
     for chemin in list(_fichiers_surveilles):
-        a_tronque, supprimees = _tronquer_si_necessaire(chemin, PLAFOND_URGENCE_LIGNES)
-        if a_tronque:
+        statut, supprimees = _tronquer_si_necessaire(chemin, PLAFOND_URGENCE_LIGNES)
+
+        if statut == "tronque":
             log.warning(
                 f"🚨 Nettoyage d'urgence : {os.path.basename(chemin)} — "
                 f"{supprimees} ligne(s) supprimée(s), {PLAFOND_URGENCE_LIGNES} conservée(s)"
             )
+        elif statut == "echec_ecriture":
+            # Seul ce cas précis justifie la suppression totale : le
+            # disque était trop plein pour même écrire une version
+            # tronquée plus petite. Un fichier "rien_a_faire" (déjà petit,
+            # absent, ou vide) n'est JAMAIS supprimé pour cette raison.
+            _supprimer_en_urgence(chemin)
+        # statut == "rien_a_faire" : fichier déjà petit, absent ou vide —
+        # aucune action, ce n'est pas lui qui pose problème.
     return True
 
 
