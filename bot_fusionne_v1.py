@@ -1003,7 +1003,7 @@ from config import (
     MAX_ALERTES_PAR_MINUTE, COOLDOWN_PAR_CRYPTO_SEC,
     FILTRAGE_ML_ACTIF, SEUIL_ML_CONFIANCE_MIN,
     SUIVI_ACTIF, SEUIL_BENEFICE_REEL_ACTIF, SEUIL_BENEFICE_REEL_PCT,
-    MONTANT_PAR_TRADE_USDT,
+    MONTANT_PAR_TRADE_USDT, FILTRE_RETRAITS_MODE,
     PERP_ACTIF, LISTINGS_ACTIF, LISTINGS_INTERVALLE_SEC,
 )
 import filtre_ml
@@ -1274,6 +1274,103 @@ TRIANGLES_STANDARD = [("BTCUSDT", "ETHBTC", "ETHUSDT"), ("BTCUSDT", "SOLBTC", "S
 # exchange que ceux impliqués dans cette combinaison précise
 _dernieres_valeurs_opportunites: dict[str, tuple] = {}
 
+# ⚠️ Ajouté le 08/08, après plusieurs allers-retours pour bien cerner le
+# besoin : PAS une vérification à chaque changement de prix (ce qui avait
+# été retiré, trop bruyant), mais une SÉLECTION construite UNE SEULE FOIS
+# par cycle de données verif_retraits (~6h), consultée ensuite en lecture
+# silencieuse à chaque opportunité — un simple lookup dans un set, aucun
+# appel à verif_retraits ni aucun log répété pendant le fonctionnement.
+#
+# {(symbole, ex_achat, ex_vente)} — présent dans ce set = circulation
+# vérifiée ouverte (retrait achat + dépôt vente + réseau commun).
+_liste_blanche_circulation: set[tuple] = set()
+_cycle_liste_blanche = -1  # force la toute première construction au démarrage
+
+
+def construire_liste_blanche():
+    """
+    Parcourt UNE FOIS toutes les combinaisons (symbole, plateforme A,
+    plateforme B) actuellement connues de prix_live, et retient celles
+    dont la circulation est vérifiée ouverte — exactement la question
+    "cette crypto accepte-t-elle le dépôt et le retrait entre ces deux
+    exchanges", posée une seule fois par cycle plutôt qu'à chaque tick.
+
+    Aucun appel réseau ici : verif_retraits.autorise_trade() ne lit que
+    son cache déjà chargé (rafraîchi séparément toutes les 6h).
+
+    ⚠️ Limite assumée : un symbole qui apparaît APRÈS cette construction
+    (nouveau listing, nouvelle plateforme activée) n'entre dans la liste
+    blanche qu'au PROCHAIN cycle — pas de vérification à la volée entre
+    deux constructions. C'est le compromis direct de "une seule fois" :
+    en échange du silence pendant le fonctionnement, la sélection n'est
+    pas instantanément à jour à la seconde près.
+    """
+    global _liste_blanche_circulation
+    nouvelle_liste = set()
+    testes = 0
+
+    # Toutes les plateformes actuellement actives, dérivées de prix_live
+    # plutôt que d'une liste figée — reste correct même si une plateforme
+    # est désactivée/activée entre deux cycles (voir selection_exchanges.py).
+    exchanges_connus = list(prix_live.keys())
+
+    # Reconstruit, pour chaque symbole, l'ensemble des plateformes qui le
+    # suivent actuellement — une seule passe sur tout prix_live.
+    plateformes_par_symbole: dict[str, set] = {}
+    for exchange, symboles in prix_live.items():
+        for symbole in symboles:
+            plateformes_par_symbole.setdefault(symbole, set()).add(exchange)
+
+    for symbole, plateformes in plateformes_par_symbole.items():
+        if len(plateformes) < 2:
+            continue  # un seul exchange = aucun trajet possible, rien à tester
+        for ex_achat in plateformes:
+            for ex_vente in plateformes:
+                if ex_achat == ex_vente:
+                    continue
+                testes += 1
+                autorise, _motif = verif_retraits.autorise_trade(
+                    symbole, ex_achat, ex_vente, FILTRE_RETRAITS_MODE
+                )
+                if autorise:
+                    nouvelle_liste.add((symbole, ex_achat, ex_vente))
+
+    _liste_blanche_circulation = nouvelle_liste
+    log = logging.getLogger("arbitrage_engine")
+    log.info(
+        f"🔄 Sélection des cryptos disponibles (dépôt+retrait) terminée : "
+        f"{len(nouvelle_liste)} trajet(s) autorisé(s) sur {testes} testé(s), "
+        f"{len(exchanges_connus)} plateforme(s), mode {FILTRE_RETRAITS_MODE}"
+    )
+
+
+async def boucle_construction_liste_blanche(intervalle_verif_sec: float = 30):
+    """
+    À lancer au démarrage :
+        asyncio.create_task(boucle_construction_liste_blanche())
+
+    Surveille le compteur de cycle de verif_retraits.py (léger, aucun appel
+    réseau) et reconstruit la liste blanche UNE SEULE FOIS à chaque
+    changement — pas de dépendance circulaire avec verif_retraits.py
+    (celui-ci ne connaît rien de cette liste, juste un compteur qu'il
+    incrémente pour lui-même).
+    """
+    global _cycle_liste_blanche
+    while True:
+        await asyncio.sleep(intervalle_verif_sec)
+        try:
+            if not verif_retraits.donnees_disponibles():
+                continue
+            cycle_actuel = verif_retraits.numero_cycle()
+            if cycle_actuel != _cycle_liste_blanche:
+                construire_liste_blanche()
+                _cycle_liste_blanche = cycle_actuel
+        except Exception:
+            logging.getLogger("arbitrage_engine").exception(
+                "erreur lors de la construction de la liste blanche"
+            )
+
+
 # Limiteur de débit : cooldown de COOLDOWN_PAR_CRYPTO_SEC (15s par défaut)
 # par crypto individuelle, + quota global de MAX_ALERTES_PAR_MINUTE cryptos
 # différentes par minute glissante (protège contre une saturation globale).
@@ -1441,14 +1538,17 @@ async def _traiter_opportunites_symbole(symbol: str, log):
             franchit_le_seuil = opp.spread_net_pct >= seuil_inter_actif
 
         if franchit_le_seuil:
-            # ⚠️ Retiré le 08/08 sur demande explicite : le bot alerte à
-            # nouveau sur TOUS les écarts qui dépassent le seuil, sans
-            # vérifier le retrait/dépôt au moment de l'alerte. verif_retraits.py
-            # reste un outil séparé et fonctionnel — consultable via
-            # /classement, le panneau "Circulation des cryptos" de la webapp,
-            # ou directement en important le module — mais il n'influence
-            # plus quelles alertes partent.
-            #
+            # ⚠️ Reconstruit le 08/08, cette fois correctement : PAS un appel
+            # à verif_retraits ici (ça, c'était trop bruyant, retiré plus
+            # tôt) — un simple lookup dans la liste blanche déjà construite
+            # UNE FOIS par cycle (voir construire_liste_blanche() plus haut).
+            # Silencieux par nature : aucun log à chaque opportunité, la
+            # sélection elle-même a déjà été annoncée une fois en clair
+            # ("Sélection des cryptos disponibles... terminée").
+            cle_circulation = (opp.symboles[0], opp.exchanges[0], opp.exchanges[1])
+            if cle_circulation not in _liste_blanche_circulation:
+                continue
+
             # Score ML (probabilité que l'opportunité tienne 5s) — None si le
             # modèle n'est pas encore entraîné/chargé, aucun impact dans ce cas
             opp.score_ml = filtre_ml.score_opportunite(opp)
@@ -1846,6 +1946,10 @@ async def main():
     # gestion_fichiers.py pour le détail du compromis assumé (troncature
     # définitive au-delà du plafond, pas d'archivage sur le même disque).
     tasks.append(asyncio.create_task(gestion_fichiers.boucle_surveillance()))
+    # ⚠️ Ajouté le 08/08 : construit la sélection des cryptos disponibles
+    # (dépôt+retrait) UNE FOIS par cycle verif_retraits (~6h), consultée
+    # ensuite en silence — voir construire_liste_blanche() plus haut.
+    tasks.append(asyncio.create_task(boucle_construction_liste_blanche()))
     # Classement des plateformes candidates (mesure, ne branche rien
     # automatiquement sur les WebSockets) — consultable via /classement
     # sur Telegram ou l'endpoint /api/classement
