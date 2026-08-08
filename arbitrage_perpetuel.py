@@ -66,6 +66,9 @@ from config import (
 log = logging.getLogger("arbitrage_perpetuel")
 
 CSV_PATH = stockage.chemin_donnees("opportunites_perpetuel.csv")
+
+import gestion_fichiers
+gestion_fichiers.enregistrer_fichier(CSV_PATH)
 COLONNES = [
     "timestamp", "exchange", "symbole", "prix_spot", "prix_perp",
     "base_pct", "funding_pct", "funding_apr_pct", "periodes_par_jour",

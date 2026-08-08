@@ -45,6 +45,9 @@ from config import (
 log = logging.getLogger("positions_attente")
 
 CSV_PATH = stockage.chemin_donnees("positions_attente.csv")
+
+import gestion_fichiers
+gestion_fichiers.enregistrer_fichier(CSV_PATH)
 COLONNES = [
     "timestamp_ouverture", "timestamp_cloture", "duree_attente_sec",
     "symbole", "exchange_achat", "exchange_vente", "montant_usdt",

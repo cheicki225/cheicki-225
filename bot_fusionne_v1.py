@@ -28,6 +28,7 @@ import api_server
 import suivi_opportunite
 import positions_attente
 import verif_retraits
+import gestion_fichiers
 import classement_exchanges
 import selection_exchanges
 import arbitrage_perpetuel
@@ -1839,6 +1840,12 @@ async def main():
     tasks.append(asyncio.create_task(logos_crypto.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(frais_retrait.boucle_rafraichissement()))
     tasks.append(asyncio.create_task(verif_retraits.boucle_rafraichissement()))
+    # ⚠️ Ajouté le 08/08 suite à l'incident "No space left on device" —
+    # surveille l'espace disque réel toutes les 60s (urgence) et plafonne
+    # chaque CSV enregistré toutes les 1h (rotation normale). Voir
+    # gestion_fichiers.py pour le détail du compromis assumé (troncature
+    # définitive au-delà du plafond, pas d'archivage sur le même disque).
+    tasks.append(asyncio.create_task(gestion_fichiers.boucle_surveillance()))
     # Classement des plateformes candidates (mesure, ne branche rien
     # automatiquement sur les WebSockets) — consultable via /classement
     # sur Telegram ou l'endpoint /api/classement

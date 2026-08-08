@@ -50,6 +50,13 @@ log = logging.getLogger("opportunity_logger")
 
 CSV_PATH = stockage.chemin_donnees("opportunites_log.csv")
 
+# ⚠️ Ajouté le 08/08, suite à l'incident "No space left on device" (le
+# volume Railway s'est rempli faute de limite sur ces CSV) — voir
+# gestion_fichiers.py. Plafond par défaut (100k lignes) : largement de
+# quoi entraîner le modèle ML tout en garantissant un espace disque borné.
+import gestion_fichiers
+gestion_fichiers.enregistrer_fichier(CSV_PATH)
+
 # Montant de référence pour le calcul des frais de retrait — identique à
 # paper_trading.MONTANT_PAR_TRADE_USDT (50.0), défini localement ici pour ne
 # pas créer de dépendance croisée entre les deux modules.

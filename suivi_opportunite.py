@@ -49,6 +49,10 @@ COLONNES = [
 # Mélanger les deux schémas dans un même fichier aurait rendu l'analyse a
 # posteriori confuse (colonnes vides selon le type, sens différent).
 CSV_PATH_TRIANGLE = stockage.chemin_donnees("suivi_triangles.csv")
+
+import gestion_fichiers
+gestion_fichiers.enregistrer_fichier(CSV_PATH)
+gestion_fichiers.enregistrer_fichier(CSV_PATH_TRIANGLE)
 COLONNES_TRIANGLE = [
     "timestamp", "opportunite_id", "exchange", "paire_1", "paire_2", "paire_3",
     "seconde", "spread_brut_pct", "spread_net_pct", "profit_usdt", "donnee_manquante",

@@ -50,6 +50,9 @@ from config import (
 log = logging.getLogger("paper_trading")
 
 CSV_PATH = stockage.chemin_donnees("trades_papier.csv")
+
+import gestion_fichiers
+gestion_fichiers.enregistrer_fichier(CSV_PATH)
 COLONNES = [
     "timestamp", "symbole", "exchange_achat", "exchange_vente",
     "montant_usdt", "spread_affiche_pct",
@@ -96,6 +99,7 @@ _stats_par_crypto = {}  # symbole -> {"reussis": N, "total": N}
 # --- Soldes fictifs par exchange (pour le rééquilibrage simulé) ---
 _soldes_virtuels = {}  # exchange -> solde USDT fictif
 TRANSFERTS_CSV_PATH = stockage.chemin_donnees("transferts_papier.csv")
+gestion_fichiers.enregistrer_fichier(TRANSFERTS_CSV_PATH)
 TRANSFERTS_COLONNES = [
     "timestamp", "exchange_source", "exchange_destination",
     "montant_usdt", "frais_usdt", "reseau", "raison",
